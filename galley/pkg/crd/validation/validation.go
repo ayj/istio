@@ -74,7 +74,7 @@ func webhookHTTPSHandlerReady(client httpClient, vc *WebhookParameters) error {
 }
 
 //RunValidation start running Galley validation mode
-func RunValidation(ready chan<- struct{}, stopCh chan struct{}, vc *WebhookParameters,
+func RunValidation(ready chan<- struct{}, stopCh <-chan struct{}, vc *WebhookParameters,
 	kubeInterface kubernetes.Interface, kubeConfig string, livenessProbeController, readinessProbeController probe.Controller) {
 	log.Infof("Galley validation started with \n%s", vc)
 	mixerValidator := mixervalidate.NewDefaultValidator(false)
@@ -83,7 +83,7 @@ func RunValidation(ready chan<- struct{}, stopCh chan struct{}, vc *WebhookParam
 	var err error
 	// The linter insists on passing kube.Interface - but checking kubeInterface == nil will
 	// fail - the value is nil, not the interface. Magic of go.
-	if kubeInterface.(*kubernetes.Clientset) == nil {
+	if kubeInterface == nil || kubeInterface.(*kubernetes.Clientset) == nil {
 		clientset, err = kube.CreateClientset(kubeConfig, "")
 		if err != nil {
 			log.Fatalf("could not create k8s clientset: %v", err)
@@ -102,6 +102,8 @@ func RunValidation(ready chan<- struct{}, stopCh chan struct{}, vc *WebhookParam
 	if vc.Mux == nil && livenessProbeController != nil {
 		validationLivenessProbe.SetAvailable(nil)
 		validationLivenessProbe.RegisterProbe(livenessProbeController, "validationLiveness")
+	} else {
+		validationLivenessProbe.SetAvailable(nil)
 	}
 
 	validationReadinessProbe := probe.NewProbe()
@@ -136,6 +138,8 @@ func RunValidation(ready chan<- struct{}, stopCh chan struct{}, vc *WebhookParam
 				// check again
 			}
 		}()
+	} else {
+		validationReadinessProbe.SetAvailable(nil)
 	}
 
 	go func() {

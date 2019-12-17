@@ -131,7 +131,7 @@ func init() {
 		"Initial connection window size for MCP's gRPC connection")
 
 	// Config Controller options
-	discoveryCmd.PersistentFlags().BoolVar(&serverArgs.Config.DisableInstallCRDs, "disable-install-crds", false,
+	discoveryCmd.PersistentFlags().BoolVar(&serverArgs.Config.DisableInstallCRDs, "disable-install-crds", true,
 		"Disable discovery service from verifying the existence of CRDs at startup and then installing if not detected.  "+
 			"It is recommended to be disable for highly available setups.")
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.Config.FileDir, "configDir", "",

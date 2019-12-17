@@ -233,6 +233,11 @@ func NewServer(args PilotArgs) (*Server, error) {
 		return nil, fmt.Errorf("sidecar injector: %v", err)
 	}
 
+	// Run webhook validation in pilot.
+	if err := s.initConfigValidation(&args); err != nil {
+		return nil, fmt.Errorf("config validation: %v", err)
+	}
+
 	s.initSDSCA()
 
 	// TODO: don't run this if galley is started, one ctlz is enough

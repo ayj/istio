@@ -305,6 +305,7 @@ func NewWebhookConfigController(p WebhookParameters) (*WebhookConfigController, 
 		createInformerWebhookSource: defaultCreateInformerWebhookSource,
 	}
 
+	// TODO - attach istiod webhook to pilot.
 	galleyClusterRoleName := "istio-galley-" + whc.webhookParameters.DeploymentAndServiceNamespace
 	galleyClusterRole, err := whc.webhookParameters.Clientset.RbacV1().ClusterRoles().Get(
 		galleyClusterRoleName, metav1.GetOptions{})
