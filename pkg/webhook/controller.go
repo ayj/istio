@@ -1,3 +1,17 @@
+// Copyright 2019 Istio Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package webhook
 
 import (
@@ -5,35 +19,28 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
-	"os"
 	"reflect"
 	"time"
 
-	kubeApiAdmission "k8s.io/api/admissionregistration/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeApiAdmission "k8s.io/api/admissionregistration/v1beta1"
+	kubeApiRbac "k8s.io/api/rbac/v1"
+	kubeErrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	kubeApiMeta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer/json"
-	"k8s.io/apimachinery/pkg/runtime/serializer/versioning"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
-	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/kubectl/pkg/scheme"
 
 	"istio.io/pkg/filewatcher"
 	"istio.io/pkg/log"
 )
 
 var scope = log.RegisterScope("webhook controller", "webhook controller", 0)
-
-const (
-	galleyDeploymentName = "istio-galley"
-)
 
 type Options struct {
 	WatchedNamespace string
@@ -42,61 +49,73 @@ type Options struct {
 	ConfigPath       string
 	ConfigName       string
 	ServiceName      string
-	Client           clientset.Interface
+	Client           kubernetes.Interface
+	GalleyDeployment string
 }
 
 type Controller struct {
-	o         Options
-	queue     workqueue.RateLimitingInterface
-	ownerRefs []metav1.OwnerReference
-
-	sharedInformers informers.SharedInformerFactory
-	caFileWatcher   filewatcher.FileWatcher
-
-	endpointReady bool // webhook endpoint has been marked as ready.
-	doReconcile   bool // controller is responsible for reconciling the webhook
-
-	codec runtime.Codec
+	o                 Options
+	ownerRefs         []kubeApiMeta.OwnerReference
+	queue             workqueue.RateLimitingInterface
+	sharedInformers   informers.SharedInformerFactory
+	caFileWatcher     filewatcher.FileWatcher
+	readFile          func(filename string) ([]byte, error) // test stub
+	reconcileDone     func()
+	endpointReadyOnce bool
 }
 
-type workType int
+type work struct{}
 
-const (
-	workCheckWebhook workType = iota
-	workCheckDeployment
-	workCheckCAFile
-	workCheckEndpoint
-)
+func filter(in interface{}, wantName, wantNamespace string) (skip bool) {
+	obj, err := meta.Accessor(in)
+	if err != nil {
+		return true
+	}
+	if wantNamespace != "" && obj.GetNamespace() != wantNamespace {
+		return true
+	}
+	if wantName != "" && obj.GetName() != wantName {
+		return true
+	}
+	return false
+}
 
-func makeEventHandler(wq workqueue.Interface, w workType) *cache.ResourceEventHandlerFuncs {
+func makeEventHandler(queue workqueue.Interface, name, namespace string) *cache.ResourceEventHandlerFuncs {
 	return &cache.ResourceEventHandlerFuncs{
-		AddFunc: func(_ interface{}) { wq.Add(w) },
+		AddFunc: func(obj interface{}) {
+			if filter(obj, name, namespace) {
+				return
+			}
+			queue.Add(&work{})
+		},
 		UpdateFunc: func(prev, curr interface{}) {
+			if filter(curr, name, namespace) {
+				return
+			}
 			if !reflect.DeepEqual(prev, curr) {
-				wq.Add(w)
+				queue.Add(&work{})
 			}
 		},
-		DeleteFunc: func(_ interface{}) { wq.Add(w) },
+		DeleteFunc: func(obj interface{}) {
+			if _, ok := obj.(kubeApiMeta.Object); !ok {
+				// If the object doesn't have Metadata, assume it is a tombstone object
+				// of type DeletedFinalStateUnknown
+				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+				if !ok {
+					return
+				}
+				obj = tombstone.Obj
+			}
+			if filter(obj, name, namespace) {
+				return
+			}
+			queue.Add(&work{})
+		},
 	}
 }
 
-func createAdmissionCodec() runtime.Codec {
-	scheme := runtime.NewScheme()
-	utilruntime.Must(kubeApiAdmission.AddToScheme(scheme))
-	opt := json.SerializerOptions{true, false, false}
-	serializer := json.NewSerializerWithOptions(json.DefaultMetaFactory, scheme, scheme, opt)
-	codec := versioning.NewDefaultingCodecForScheme(
-		scheme,
-		serializer,
-		serializer,
-		kubeApiAdmission.SchemeGroupVersion,
-		runtime.InternalGroupVersioner,
-	)
-	return codec
-}
-
-func findOwnerRefs(client clientset.Interface, clusterRoleName string) []metav1.OwnerReference {
-	clusterRole, err := client.RbacV1().ClusterRoles().Get(clusterRoleName, metav1.GetOptions{})
+func findOwnerRefs(client kubernetes.Interface, clusterRoleName string) []kubeApiMeta.OwnerReference {
+	clusterRole, err := client.RbacV1().ClusterRoles().Get(clusterRoleName, kubeApiMeta.GetOptions{})
 	if err != nil {
 		scope.Warnf("Could not find clusterrole: %s to set ownerRef. "+
 			"The webhook configuration must be deleted manually.",
@@ -104,54 +123,48 @@ func findOwnerRefs(client clientset.Interface, clusterRoleName string) []metav1.
 		return nil
 	}
 
-	return []metav1.OwnerReference{
-		*metav1.NewControllerRef(
+	return []kubeApiMeta.OwnerReference{
+		*kubeApiMeta.NewControllerRef(
 			clusterRole,
-			rbacv1.SchemeGroupVersion.WithKind("ClusterRole"),
+			kubeApiRbac.SchemeGroupVersion.WithKind("ClusterRole"),
 		),
 	}
 }
 
 func New(o Options) *Controller {
+	return newController(o, filewatcher.NewWatcher, ioutil.ReadFile, nil)
+}
+
+type readFileFunc func(filename string) ([]byte, error)
+
+func newController(
+	o Options,
+	newFileWatcher filewatcher.NewFileWatcherFunc,
+	readFile readFileFunc,
+	reconcileDone func(),
+) *Controller {
 	c := &Controller{
 		o:             o,
 		queue:         workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter()),
-		codec:         createAdmissionCodec(),
-		caFileWatcher: filewatcher.NewWatcher(),
+		caFileWatcher: newFileWatcher(),
+		readFile:      readFile,
+		reconcileDone: reconcileDone,
 		ownerRefs:     findOwnerRefs(o.Client, "istiod-istio-system"),
 	}
 
-	sharedInformers := informers.NewSharedInformerFactoryWithOptions(o.Client, o.ResyncPeriod,
+	c.sharedInformers = informers.NewSharedInformerFactoryWithOptions(o.Client, o.ResyncPeriod,
 		informers.WithNamespace(o.WatchedNamespace))
 
-	webhookInformer := sharedInformers.Admissionregistration().V1().ValidatingWebhookConfigurations().Informer()
-	webhookInformer.AddEventHandler(makeEventHandler(c.queue, workCheckWebhook))
+	webhookInformer := c.sharedInformers.Admissionregistration().V1beta1().ValidatingWebhookConfigurations().Informer()
+	webhookInformer.AddEventHandler(makeEventHandler(c.queue, o.ConfigName, ""))
 
-	endpointInformer := sharedInformers.Core().V1().Endpoints().Informer()
-	endpointInformer.AddEventHandler(makeEventHandler(c.queue, workCheckEndpoint))
+	endpointInformer := c.sharedInformers.Core().V1().Endpoints().Informer()
+	endpointInformer.AddEventHandler(makeEventHandler(c.queue, o.ServiceName, o.WatchedNamespace))
 
-	deploymentInformer := sharedInformers.Apps().V1().Deployments().Informer()
-	deploymentInformer.AddEventHandler(makeEventHandler(c.queue, workCheckDeployment))
+	deploymentInformer := c.sharedInformers.Apps().V1().Deployments().Informer()
+	deploymentInformer.AddEventHandler(makeEventHandler(c.queue, o.GalleyDeployment, o.WatchedNamespace))
 
 	return c
-}
-
-func (c *Controller) startFileWatcher(stop <-chan struct{}) {
-	for {
-		select {
-		case <-c.caFileWatcher.Events(c.o.CAPath):
-			c.queue.Add(workCheckCAFile)
-		case <-c.caFileWatcher.Errors(c.o.CAPath):
-			// log only
-		case <-stop:
-			return
-		}
-	}
-}
-
-func (c *Controller) runWorker() {
-	for c.processNextWorkItem() {
-	}
 }
 
 func (c *Controller) Start(stop <-chan struct{}) {
@@ -164,12 +177,68 @@ func (c *Controller) Start(stop <-chan struct{}) {
 		}
 	}
 
+	// inject a deployment check to force the initial reconcilation check.
+	c.queue.Add(&work{})
+
 	go c.runWorker()
 }
 
-// Load a PEM encoded cert from the input reader. This also verifies that the certificate is a validate x509 cert.
-func loadAndValidateCert(in io.Reader) ([]byte, error) {
-	certBytes, err := ioutil.ReadAll(in)
+func (c *Controller) startFileWatcher(stop <-chan struct{}) {
+	for {
+		select {
+		case <-c.caFileWatcher.Events(c.o.CAPath):
+			c.queue.Add(&work{})
+		case <-c.caFileWatcher.Errors(c.o.CAPath):
+			// log only
+		case <-stop:
+			return
+		}
+	}
+}
+
+func (c *Controller) processDeployments() (stop bool, err error) {
+	galley, err := c.sharedInformers.Apps().V1().
+		Deployments().Lister().Deployments(c.o.WatchedNamespace).Get(c.o.GalleyDeployment)
+
+	// galley does/doesn't exist
+	if err != nil {
+		if kubeErrors.IsNotFound(err) {
+			return false, nil
+		}
+		return true, err
+	}
+
+	// galley is scaled down to zero replicas. This is useful for debugging
+	// to force the istiod controller to run.
+	if galley.Spec.Replicas != nil && *galley.Spec.Replicas == 0 {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (c *Controller) processEndpoints() (stop bool, err error) {
+	if c.endpointReadyOnce {
+		return false, nil
+	}
+	endpoint, err := c.sharedInformers.Core().V1().
+		Endpoints().Lister().Endpoints(c.o.WatchedNamespace).Get(c.o.ServiceName)
+	if err != nil {
+		if kubeErrors.IsNotFound(err) {
+			return true, nil
+		}
+		return true, err
+	}
+	for _, subset := range endpoint.Subsets {
+		if len(subset.Addresses) > 0 {
+			c.endpointReadyOnce = true
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (c *Controller) buildCABundle() ([]byte, error) {
+	certBytes, err := c.readFile(c.o.CAPath)
 	if err != nil {
 		return nil, err
 	}
@@ -186,22 +255,26 @@ func loadAndValidateCert(in io.Reader) ([]byte, error) {
 	return certBytes, nil
 }
 
-func (c *Controller) buildValidatingWebhookConfig() (*kubeApiAdmission.ValidatingWebhookConfiguration, error) {
-	encoded, err := ioutil.ReadFile(c.o.CAPath)
+func (c *Controller) buildConfig() (*kubeApiAdmission.ValidatingWebhookConfiguration, error) {
+	encoded, err := c.readFile(c.o.ConfigPath)
 	if err != nil {
 		return nil, err
 	}
-	decoded, _, err := c.codec.Decode(encoded, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	config := decoded.(*kubeApiAdmission.ValidatingWebhookConfiguration)
 
-	ca, err := os.Open(c.o.CAPath)
+	var config kubeApiAdmission.ValidatingWebhookConfiguration
+	if err := runtime.DecodeInto(scheme.Codecs.UniversalDecoder(), encoded, &config); err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+func (c *Controller) buildValidatingWebhookConfig() (*kubeApiAdmission.ValidatingWebhookConfiguration, error) {
+	config, err := c.buildConfig()
 	if err != nil {
 		return nil, err
 	}
-	caPem, err := loadAndValidateCert(ca)
+
+	caBundle, err := c.buildCABundle()
 	if err != nil {
 		return nil, err
 	}
@@ -209,21 +282,38 @@ func (c *Controller) buildValidatingWebhookConfig() (*kubeApiAdmission.Validatin
 	// update runtime fields
 	config.OwnerReferences = c.ownerRefs
 	for i := range config.Webhooks {
-		config.Webhooks[i].ClientConfig.CABundle = caPem
+		config.Webhooks[i].ClientConfig.CABundle = caBundle
 	}
 
 	return config, nil
 }
 
-func (c *Controller) buildAndUpdateValidatingConfig() error {
+func (c *Controller) reconcile() error {
+	defer func() {
+		if c.reconcileDone != nil {
+			c.reconcileDone()
+		}
+	}()
+
+	// skip reconciliation if our endpoint isn't ready ...
+	if stop, err := c.processEndpoints(); stop || err != nil {
+		return err
+	}
+	// ... or another galley deployment is already managed the webhook.
+	if stop, err := c.processDeployments(); stop || err != nil {
+		return err
+	}
+
 	desired, err := c.buildValidatingWebhookConfig()
 	if err != nil {
 		return err
 	}
 
-	current, err := c.sharedInformers.Admissionregistration().V1().ValidatingWebhookConfigurations().Lister().Get(c.o.ConfigName)
-	if k8serrors.IsNotFound(err) {
-		_, err := c.o.Client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Create(desired)
+	current, err := c.sharedInformers.Admissionregistration().V1beta1().
+		ValidatingWebhookConfigurations().Lister().Get(c.o.ConfigName)
+	if kubeErrors.IsNotFound(err) {
+		_, err := c.o.Client.AdmissionregistrationV1beta1().
+			ValidatingWebhookConfigurations().Create(desired)
 		if err != nil {
 			return err
 		}
@@ -235,7 +325,8 @@ func (c *Controller) buildAndUpdateValidatingConfig() error {
 	updated.OwnerReferences = desired.OwnerReferences
 
 	if !reflect.DeepEqual(updated, current) {
-		_, err := c.o.Client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(updated)
+		_, err := c.o.Client.AdmissionregistrationV1beta1().
+			ValidatingWebhookConfigurations().Update(updated)
 		if err != nil {
 			return err
 		}
@@ -251,51 +342,22 @@ func (c *Controller) processNextWorkItem() (cont bool) {
 	}
 	defer c.queue.Done(obj)
 
-	work, ok := obj.(workType)
-	if !ok {
+	if _, ok := obj.(*work); !ok {
 		// don't retry an invalid work item
 		c.queue.Forget(obj)
 		return true
 	}
 
-	var retry bool
-	switch work {
-	case workCheckWebhook, workCheckCAFile:
-		if c.doReconcile {
-			if err := c.buildAndUpdateValidatingConfig(); err != nil {
-				retry = true
-			}
-		}
-	case workCheckDeployment:
-		_, err := c.sharedInformers.Apps().V1().Deployments().Lister().Deployments(c.o.WatchedNamespace).Get(galleyDeploymentName)
-		if kerrors.IsNotFound(err) {
-			c.doReconcile = true
-			c.queue.Add("webhook")
-		} else {
-			c.doReconcile = false
-		}
-	case workCheckEndpoint:
-		if c.endpointReady {
-			break
-		}
-		endpoint, err := c.sharedInformers.Core().V1().Endpoints().Lister().Endpoints(c.o.WatchedNamespace).Get(c.o.ServiceName)
-		if err != nil {
-			retry = true
-			break
-		}
-		if len(endpoint.Subsets) == 0 {
-			break
-		}
-		for _, subset := range endpoint.Subsets {
-			if len(subset.Addresses) > 0 {
-				c.endpointReady = true
-				break
-			}
-		}
-	}
-
-	if !retry {
+	if err := c.reconcile(); err != nil {
+		c.queue.AddRateLimited(obj)
+		utilruntime.HandleError(err)
+	} else {
 		c.queue.Forget(obj)
 	}
 	return true
+}
+
+func (c *Controller) runWorker() {
+	for c.processNextWorkItem() {
+	}
 }

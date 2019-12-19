@@ -162,6 +162,7 @@ require (
 	k8s.io/cli-runtime v0.0.0
 	k8s.io/client-go v11.0.1-0.20190409021438-1a26190bd76a+incompatible
 	k8s.io/helm v2.14.3+incompatible
+	k8s.io/kubectl v0.0.0-20191003004222-1f3c0cd90ca9
 	sigs.k8s.io/kind v0.6.1 // indirect
 	sigs.k8s.io/yaml v1.1.0
 )
