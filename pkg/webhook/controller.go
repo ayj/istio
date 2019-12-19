@@ -24,11 +24,14 @@ import (
 	"time"
 
 	kubeApiAdmission "k8s.io/api/admissionregistration/v1beta1"
+	kubeApiApp "k8s.io/api/apps/v1"
+	kubeApiCore "k8s.io/api/core/v1"
 	kubeApiRbac "k8s.io/api/rbac/v1"
 	kubeErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	kubeApiMeta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -51,6 +54,7 @@ type Options struct {
 	ServiceName      string
 	Client           kubernetes.Interface
 	GalleyDeployment string
+	ClusterRoleName  string
 }
 
 type Controller struct {
@@ -64,36 +68,53 @@ type Controller struct {
 	endpointReadyOnce bool
 }
 
-type work struct{}
-
-func filter(in interface{}, wantName, wantNamespace string) (skip bool) {
-	obj, err := meta.Accessor(in)
-	if err != nil {
-		return true
-	}
-	if wantNamespace != "" && obj.GetNamespace() != wantNamespace {
-		return true
-	}
-	if wantName != "" && obj.GetName() != wantName {
-		return true
-	}
-	return false
+type reconcileRequest struct {
+	description string
 }
 
-func makeEventHandler(queue workqueue.Interface, name, namespace string) *cache.ResourceEventHandlerFuncs {
+func (rr reconcileRequest) String() string {
+	return rr.description
+}
+
+func filter(in interface{}, wantName, wantNamespace string) (skip bool, key string) {
+	obj, err := meta.Accessor(in)
+	if err != nil {
+		skip = true
+		return
+	}
+	if wantNamespace != "" && obj.GetNamespace() != wantNamespace {
+		skip = true
+		return
+	}
+	if wantName != "" && obj.GetName() != wantName {
+		skip = true
+		return
+	}
+
+	// ignore the error because there's nothing to do if this fails.
+	key, _ = cache.DeletionHandlingMetaNamespaceKeyFunc(in)
+	return
+}
+
+func makeHandler(queue workqueue.Interface, gvk schema.GroupVersionKind, nameMatch, namespaceMatch string) *cache.ResourceEventHandlerFuncs {
 	return &cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			if filter(obj, name, namespace) {
+			skip, key := filter(obj, nameMatch, namespaceMatch)
+			if skip {
 				return
 			}
-			queue.Add(&work{})
+
+			req := &reconcileRequest{fmt.Sprintf("adding (%v, Kind=%v) %v", gvk.GroupVersion(), gvk.Kind, key)}
+			queue.Add(req)
 		},
 		UpdateFunc: func(prev, curr interface{}) {
-			if filter(curr, name, namespace) {
+			skip, key := filter(curr, nameMatch, namespaceMatch)
+			if skip {
 				return
 			}
 			if !reflect.DeepEqual(prev, curr) {
-				queue.Add(&work{})
+				req := &reconcileRequest{fmt.Sprintf("update (%v, Kind=%v) %v", gvk.GroupVersion(), gvk.Kind, key)}
+				queue.Add(req)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -106,10 +127,12 @@ func makeEventHandler(queue workqueue.Interface, name, namespace string) *cache.
 				}
 				obj = tombstone.Obj
 			}
-			if filter(obj, name, namespace) {
+			skip, key := filter(obj, nameMatch, namespaceMatch)
+			if skip {
 				return
 			}
-			queue.Add(&work{})
+			req := &reconcileRequest{fmt.Sprintf("delete (%v, Kind=%v) %v", gvk.GroupVersion(), gvk.Kind, key)}
+			queue.Add(req)
 		},
 	}
 }
@@ -137,6 +160,13 @@ func New(o Options) *Controller {
 
 type readFileFunc func(filename string) ([]byte, error)
 
+// precompute GVK for known types for the purposes of logging.
+var (
+	configGVK     = kubeApiAdmission.SchemeGroupVersion.WithKind(reflect.TypeOf(kubeApiAdmission.ValidatingWebhookConfiguration{}).Name())
+	endpointGVK   = kubeApiCore.SchemeGroupVersion.WithKind(reflect.TypeOf(kubeApiCore.Endpoints{}).Name())
+	deploymentGVK = kubeApiApp.SchemeGroupVersion.WithKind(reflect.TypeOf(kubeApiApp.Deployment{}).Name())
+)
+
 func newController(
 	o Options,
 	newFileWatcher filewatcher.NewFileWatcherFunc,
@@ -149,20 +179,20 @@ func newController(
 		caFileWatcher: newFileWatcher(),
 		readFile:      readFile,
 		reconcileDone: reconcileDone,
-		ownerRefs:     findOwnerRefs(o.Client, "istiod-istio-system"),
+		ownerRefs:     findOwnerRefs(o.Client, o.ClusterRoleName),
 	}
 
 	c.sharedInformers = informers.NewSharedInformerFactoryWithOptions(o.Client, o.ResyncPeriod,
 		informers.WithNamespace(o.WatchedNamespace))
 
 	webhookInformer := c.sharedInformers.Admissionregistration().V1beta1().ValidatingWebhookConfigurations().Informer()
-	webhookInformer.AddEventHandler(makeEventHandler(c.queue, o.ConfigName, ""))
+	webhookInformer.AddEventHandler(makeHandler(c.queue, configGVK, o.ConfigName, ""))
 
 	endpointInformer := c.sharedInformers.Core().V1().Endpoints().Informer()
-	endpointInformer.AddEventHandler(makeEventHandler(c.queue, o.ServiceName, o.WatchedNamespace))
+	endpointInformer.AddEventHandler(makeHandler(c.queue, endpointGVK, o.ServiceName, o.WatchedNamespace))
 
 	deploymentInformer := c.sharedInformers.Apps().V1().Deployments().Informer()
-	deploymentInformer.AddEventHandler(makeEventHandler(c.queue, o.GalleyDeployment, o.WatchedNamespace))
+	deploymentInformer.AddEventHandler(makeHandler(c.queue, deploymentGVK, o.GalleyDeployment, o.WatchedNamespace))
 
 	return c
 }
@@ -177,8 +207,8 @@ func (c *Controller) Start(stop <-chan struct{}) {
 		}
 	}
 
-	// inject a deployment check to force the initial reconcilation check.
-	c.queue.Add(&work{})
+	req := &reconcileRequest{"initial request to kickstart reconcilation"}
+	c.queue.Add(req)
 
 	go c.runWorker()
 }
@@ -186,8 +216,9 @@ func (c *Controller) Start(stop <-chan struct{}) {
 func (c *Controller) startFileWatcher(stop <-chan struct{}) {
 	for {
 		select {
-		case <-c.caFileWatcher.Events(c.o.CAPath):
-			c.queue.Add(&work{})
+		case ev := <-c.caFileWatcher.Events(c.o.CAPath):
+			req := &reconcileRequest{fmt.Sprintf("CA file changed: %v", ev)}
+			c.queue.Add(req)
 		case <-c.caFileWatcher.Errors(c.o.CAPath):
 			// log only
 		case <-stop:
@@ -288,12 +319,14 @@ func (c *Controller) buildValidatingWebhookConfig() (*kubeApiAdmission.Validatin
 	return config, nil
 }
 
-func (c *Controller) reconcile() error {
+func (c *Controller) reconcile(req *reconcileRequest) error {
 	defer func() {
 		if c.reconcileDone != nil {
 			c.reconcileDone()
 		}
 	}()
+
+	scope.Infof("Reconcile: %v", req)
 
 	// skip reconciliation if our endpoint isn't ready ...
 	if stop, err := c.processEndpoints(); stop || err != nil {
@@ -342,13 +375,14 @@ func (c *Controller) processNextWorkItem() (cont bool) {
 	}
 	defer c.queue.Done(obj)
 
-	if _, ok := obj.(*work); !ok {
-		// don't retry an invalid work item
-		c.queue.Forget(obj)
+	req, ok := obj.(*reconcileRequest)
+	if !ok {
+		// don't retry an invalid reconcileRequest item
+		c.queue.Forget(req)
 		return true
 	}
 
-	if err := c.reconcile(); err != nil {
+	if err := c.reconcile(req); err != nil {
 		c.queue.AddRateLimited(obj)
 		utilruntime.HandleError(err)
 	} else {

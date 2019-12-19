@@ -16,6 +16,7 @@ package webhook
 
 import (
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -63,7 +64,9 @@ var (
 			APIVersion: kubeApiAdmission.SchemeGroupVersion.String(),
 			Kind:       "ValidatingWebhookConfiguration",
 		},
-		ObjectMeta: kubeApisMeta.ObjectMeta{Name: galley},
+		ObjectMeta: kubeApisMeta.ObjectMeta{
+			Name: galleyWebhookName,
+		},
 		Webhooks: []kubeApiAdmission.ValidatingWebhook{{
 			Name: "hook0",
 			ClientConfig: kubeApiAdmission.WebhookClientConfig{Service: &kubeApiAdmission.ServiceReference{
@@ -159,23 +162,12 @@ func init() {
 type fakeController struct {
 	*Controller
 
-	caChangedCh     chan bool
-	configChangedCh chan bool
-	reconcileDoneCh chan struct{}
-	fakeWatcher     *filewatcher.FakeWatcher
-	fakeClient      *fake.Clientset
-}
-
-func (fc *fakeController) ValidatingWebhookConfigurations() kubeTypedAdmission.ValidatingWebhookConfigurationInterface {
-	return fc.o.Client.AdmissionregistrationV1beta1().ValidatingWebhookConfigurations()
-}
-
-func (fc *fakeController) Endpoints() kubeTypedCore.EndpointsInterface {
-	return fc.o.Client.CoreV1().Endpoints(fc.o.WatchedNamespace)
-}
-
-func (fc *fakeController) Deployments() kubeTypedApp.DeploymentInterface {
-	return fc.o.Client.AppsV1().Deployments(fc.o.WatchedNamespace)
+	caChangedCh      chan bool
+	configChangedCh  chan bool
+	fakeWatcher      *filewatcher.FakeWatcher
+	fakeClient       *fake.Clientset
+	stop             chan struct{}
+	reconcileCounter int32 // atomic
 }
 
 const (
@@ -186,6 +178,7 @@ const (
 	istiod               = "istiod"
 	caPath               = "fakeCAPath"
 	configPath           = "fakeConfigPath"
+	istiodClusterRole    = "istiod-istio-system"
 )
 
 func createTestController() *fakeController {
@@ -199,6 +192,7 @@ func createTestController() *fakeController {
 		ServiceName:      istiod,
 		Client:           fakeClient,
 		GalleyDeployment: galleyDeploymentName,
+		ClusterRoleName:  istiodClusterRole,
 	}
 
 	caChanged := make(chan bool, 10)
@@ -224,20 +218,43 @@ func createTestController() *fakeController {
 
 	newFileWatcher, fakeWatcher := filewatcher.NewFakeWatcher(changed)
 
-	reconcileDoneCh := make(chan struct{}, 1000)
-	reconcileDone := func() {
-		reconcileDoneCh <- struct{}{}
-	}
-
-	return &fakeController{
-		Controller:      newController(o, newFileWatcher, readFile, reconcileDone),
+	fc := &fakeController{
 		caChangedCh:     caChanged,
 		configChangedCh: configChanged,
-		reconcileDoneCh: reconcileDoneCh,
 		fakeWatcher:     fakeWatcher,
 		fakeClient:      fakeClient,
+		stop:            make(chan struct{}),
 	}
+
+	reconcileDone := func() {
+		atomic.AddInt32(&fc.reconcileCounter, 1)
+	}
+
+	fc.Controller = newController(o, newFileWatcher, readFile, reconcileDone)
+
+	return fc
 }
+
+func (fc *fakeController) reconcileAttempts() int {
+	return int(atomic.LoadInt32(&fc.reconcileCounter))
+}
+
+func (fc *fakeController) ValidatingWebhookConfigurations() kubeTypedAdmission.ValidatingWebhookConfigurationInterface {
+	return fc.o.Client.AdmissionregistrationV1beta1().ValidatingWebhookConfigurations()
+}
+
+func (fc *fakeController) Endpoints() kubeTypedCore.EndpointsInterface {
+	return fc.o.Client.CoreV1().Endpoints(fc.o.WatchedNamespace)
+}
+
+func (fc *fakeController) Deployments() kubeTypedApp.DeploymentInterface {
+	return fc.o.Client.AppsV1().Deployments(fc.o.WatchedNamespace)
+}
+
+// gomega doesn't handle multi-value return functions well. Use helper functions to get
+// the first or second return value from k8s client REST calls.
+func first(ret, _ interface{}) interface{}  { return ret }
+func second(_, ret interface{}) interface{} { return ret }
 
 func TestController_Greenfield(t *testing.T) {
 	g := NewGomegaWithT(t)
@@ -247,23 +264,22 @@ func TestController_Greenfield(t *testing.T) {
 	defer func() { close(stop) }()
 	c.Start(stop)
 
-	g.Consistently(func() error {
-		_, err := c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{})
-		return err
+	g.Consistently(func() interface{} {
+		return second(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
 	}).Should(MatchError(configNotFoundErr))
 
-	g.Expect(c.o.Client.CoreV1().Endpoints(c.o.WatchedNamespace).Create(istiodEndpoint)).Should(Succeed())
+	g.Expect(second(c.o.Client.CoreV1().Endpoints(c.o.WatchedNamespace).Create(istiodEndpoint))).Should(Succeed())
 
-	g.Eventually(func() *kubeApiAdmission.ValidatingWebhookConfiguration {
-		config, _ := c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{})
-		return config
+	g.Eventually(func() interface{} {
+		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
 	}, time.Second).Should(Equal(finalIstiodWebhookConfig))
 
-	g.Eventually(func() *kubeApiAdmission.ValidatingWebhookConfiguration {
-		config, _ := c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{})
-		return config
+	g.Eventually(func() interface{} {
+		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
 	}, time.Second).Should(Equal(finalIstiodWebhookConfig))
 }
+
+const timeout = 1000 * time.Millisecond
 
 func TestController_Upgrade(t *testing.T) {
 	g := NewGomegaWithT(t)
@@ -271,22 +287,36 @@ func TestController_Upgrade(t *testing.T) {
 
 	stop := make(chan struct{})
 	defer func() { close(stop) }()
+
 	c.Start(stop)
 
-	// simulate an existing install with Galley.
-	g.Expect(c.Deployments().Create(galleyDeployment)).Should(Succeed())
-	g.Expect(c.ValidatingWebhookConfigurations().Create(galleyWebhookConfig)).Should(Succeed())
+	// simulate an existing install with Galley before istiod is started
+	g.Expect(second(c.Deployments().Create(galleyDeployment))).Should(Succeed())
+	g.Expect(second(c.ValidatingWebhookConfigurations().Create(galleyWebhookConfig))).Should(Succeed())
 
-	g.Expect(c.Endpoints().Create(istiodEndpoint)).Should(Succeed())
+	g.Eventually(c.reconcileAttempts).Should(Equal(3)) // includes initial kickstart
 
-	// install istiod validation webhook
-	g.Consistently(func() error {
-		_, err := c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{})
-		return err
-	}).Should(Equal(galleyWebhookConfig))
+	g.Expect(second(c.o.Client.CoreV1().Endpoints(c.o.WatchedNamespace).Create(istiodEndpoint))).Should(Succeed())
+	g.Consistently(func() interface{} {
+		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
+	}, time.Second).Should(Equal(galleyWebhookConfig), "galley webhook should exist when istiod is deployed")
 
-	g.Eventually(func() *kubeApiAdmission.ValidatingWebhookConfiguration {
-		config, _ := c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{})
-		return config
-	}, time.Second).Should(Equal(finalIstiodWebhookConfig))
+	g.Expect(c.Deployments().Delete(galleyDeploymentName, &kubeApisMeta.DeleteOptions{})).Should(Succeed())
+	g.Eventually(func() interface{} {
+		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
+	}, time.Second).Should(Equal(finalIstiodWebhookConfig), "istio webhook should exist when galley is removed")
+
+	g.Expect(second(c.Deployments().Create(galleyDeployment))).Should(Succeed())
+	g.Expect(second(c.ValidatingWebhookConfigurations().Update(galleyWebhookConfig))).Should(Succeed())
+	g.Consistently(func() interface{} {
+		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
+	}, time.Second).Should(Equal(galleyWebhookConfig), "galley webhook should exist when galley is reployed")
+
+	galleyDeploymentWithZeroReplicas := galleyDeployment.DeepCopy()
+	galleyDeploymentWithZeroReplicas.Spec.Replicas = &[]int32{0}[0]
+	g.Expect(second(c.Deployments().Update(galleyDeploymentWithZeroReplicas))).Should(Succeed())
+	g.Eventually(func() interface{} {
+		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
+	}, time.Second).Should(Equal(finalIstiodWebhookConfig), "istio webhook should exist with zero galley replicas")
+
 }
