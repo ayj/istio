@@ -31,6 +31,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"istio.io/istio/pkg/webhook"
 )
 
 const (
@@ -430,9 +432,13 @@ func enableValidationWebhookConfig(client kubernetes.Interface, caCert []byte, o
 	if err != nil {
 		return fmt.Errorf("err when checking validation webhook server: %v", err)
 	}
-	webhookConfig, err := buildValidatingWebhookConfig(caCert, opt.validationWebhookConfigPath)
+	configBytes, err := ioutil.ReadFile(opt.validationWebhookConfigPath)
 	if err != nil {
-		return fmt.Errorf("err when build validatingwebhookconfiguration: %v", err)
+		return fmt.Errorf("err when build mutatingwebhookconfiguration: %v", err)
+	}
+	webhookConfig, err := webhook.BuildValidatingWebhookConfiguration(caCert, configBytes, nil)
+	if err != nil {
+		return fmt.Errorf("err when build mutatingwebhookconfiguration: %v", err)
 	}
 	_, err = createValidatingWebhookConfig(client, webhookConfig, writer)
 	if err != nil {
@@ -538,7 +544,7 @@ func readCACert(client kubernetes.Interface, certPath, secretName, secretNamespa
 				caCertServiceAccountNamespace, caCertServiceAccount, err)
 		}
 	}
-	if err = checkCertificate(caCert); err != nil {
+	if err = webhook.VerifyCABundle(caCert); err != nil {
 		return nil, fmt.Errorf("ca certificate is invalid: %v", err)
 	}
 
@@ -560,7 +566,7 @@ func readCACert(client kubernetes.Interface, certPath, secretName, secretNamespa
 			time.Sleep(2 * time.Second)
 		}
 	}
-	if err = checkCertificate(cert); err != nil {
+	if err = webhook.VerifyCABundle(cert); err != nil {
 		return nil, fmt.Errorf("webhook certificate is invalid: %v", err)
 	}
 	if err = veriyCertChain(cert, caCert); err != nil {
@@ -594,29 +600,6 @@ func waitForServerRunning(client kubernetes.Interface, namespace, svc string, ma
 	return nil
 }
 
-// Build the desired validatingwebhookconfiguration from the specified CA
-// and webhook config file.
-func buildValidatingWebhookConfig(
-	caCert []byte, webhookConfigPath string) (*v1beta1.ValidatingWebhookConfiguration, error) {
-	// load and validate configuration
-	webhookConfigData, err := ioutil.ReadFile(webhookConfigPath)
-	if err != nil {
-		return nil, err
-	}
-	var webhookConfig v1beta1.ValidatingWebhookConfiguration
-	if err := yaml.Unmarshal(webhookConfigData, &webhookConfig); err != nil {
-		return nil, fmt.Errorf("could not decode validatingwebhookconfiguration from %v: %v",
-			webhookConfigPath, err)
-	}
-
-	// patch the ca-cert into the user provided configuration
-	for i := range webhookConfig.Webhooks {
-		webhookConfig.Webhooks[i].ClientConfig.CABundle = caCert
-	}
-
-	return &webhookConfig, nil
-}
-
 // Build the desired mutatingwebhookconfiguration from the specified CA
 // and webhook config file.
 func buildMutatingWebhookConfig(
@@ -646,15 +629,11 @@ func isEndpointReady(client kubernetes.Interface, svc, namespace string) error {
 	if err != nil {
 		return err
 	}
-	if len(ep.Subsets) == 0 {
-		return fmt.Errorf("%v/%v endpoint not ready: no subsets", namespace, svc)
+	ready, reason := webhook.EndpointReady(ep)
+	if !ready {
+		return fmt.Errorf("%v/%v endpoint not ready: %v", namespace, svc, reason)
 	}
-	for _, subset := range ep.Subsets {
-		if len(subset.Addresses) > 0 {
-			return nil
-		}
-	}
-	return fmt.Errorf("%v/%v endpoint not ready: no subset addresses", namespace, svc)
+	return nil
 }
 
 // Read secret of a service account.

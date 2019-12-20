@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"testing"
 
+	"istio.io/istio/pkg/webhook"
 	"istio.io/istio/security/pkg/pki/ca"
 
 	"k8s.io/api/admissionregistration/v1beta1"
@@ -66,11 +67,49 @@ SpAJos6OfJqyok7JXDdOYRDD5/hBerj68R9llWzNJd27/1jZ0NF2sIE1W4QFddy/
 e+5z6MTAO6ktvHdQlSuH6ARn47bJrZOlkttAhg==
 -----END CERTIFICATE-----
 `
+
+	exampleValidatingConfigString = `
+apiVersion: admissionregistration.k8s.io/v1beta1
+kind: ValidatingWebhookConfiguration
+metadata:
+  labels:
+    app: protovalidatewebhook
+webhooks:
+  - clientConfig
+      caBundle: ""
+      service:
+        namespace: istio-system
+        path: /validate
+    failurePolicy: Fail
+    name: protovalidate.istio.io
+    namespaceSelector:
+      matchLabels:
+        protovalidate-validation: enabled
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+        resources:
+          - pods
+    sideEffects: Unknown`
 )
 
 var (
-	fakeCACert = []byte("fake-CA-cert")
+	fakeCACert              = []byte("fake-CA-cert")
+	exampleValidatingConfig *v1beta1.ValidatingWebhookConfiguration
 )
+
+func init() {
+	var err error
+	exampleValidatingConfig, err = webhook.BuildValidatingWebhookConfiguration(
+		[]byte(exampleCACert), []byte(exampleValidatingConfigString), nil)
+	if err != nil {
+		panic("failed to build test data")
+	}
+}
 
 func TestCheckCertificate(t *testing.T) {
 	testCases := map[string]struct {
@@ -419,13 +458,7 @@ func TestDisableWebhookConfig(t *testing.T) {
 	for tcName, tc := range testCases {
 		client := fake.NewSimpleClientset()
 		if tc.createValidatingWebhookConfig {
-			webhookConfig, err := buildValidatingWebhookConfig(
-				[]byte(exampleCACert),
-				"./testdata/webhook/example-validating-webhook-config.yaml")
-			if err != nil {
-				t.Fatalf("%v: err when build validatingwebhookconfiguration: %v", tcName, err)
-			}
-			_, err = createValidatingWebhookConfig(client, webhookConfig, &buf)
+			_, err := createValidatingWebhookConfig(client, exampleValidatingConfig, &buf)
 			if err != nil {
 				t.Fatalf("%v: err when creating validatingwebhookconfiguration: %v", tcName, err)
 			}
@@ -455,24 +488,6 @@ func TestDisableWebhookConfig(t *testing.T) {
 			if injectionErr != nil {
 				t.Errorf("%v: should not fail, but err when disabling injection webhook: %v", tcName, injectionErr)
 			}
-		}
-	}
-}
-
-func TestBuildValidatingWebhookConfig(t *testing.T) {
-	configFile := "./testdata/webhook/example-validating-webhook-config.yaml"
-	configName := "protovalidate"
-	webhookConfig, err := buildValidatingWebhookConfig(fakeCACert, configFile)
-	if err != nil {
-		t.Fatalf("err building validating webhook config %v: %v", configName, err)
-	}
-	if webhookConfig.Name != configName {
-		t.Fatalf("webhookConfig.Name (%v) is different from %v", webhookConfig.Name, configName)
-	}
-	for i := range webhookConfig.Webhooks {
-		if !bytes.Equal(webhookConfig.Webhooks[i].ClientConfig.CABundle, fakeCACert) {
-			t.Fatalf("webhookConfig CA bundle(%v) is different from %v",
-				webhookConfig.Webhooks[i].ClientConfig.CABundle, fakeCACert)
 		}
 	}
 }
@@ -519,13 +534,7 @@ func TestCreateValidatingWebhookConfig(t *testing.T) {
 		var webhookConfig *v1beta1.ValidatingWebhookConfiguration
 		var err error
 		if tc.createWebhookConfig {
-			webhookConfig, err = buildValidatingWebhookConfig(
-				[]byte(exampleCACert),
-				"./testdata/webhook/example-validating-webhook-config.yaml")
-			if err != nil {
-				t.Fatalf("%v: err when build ValidatingWebhookConfiguration: %v", tcName, err)
-			}
-			_, err = createValidatingWebhookConfig(client, webhookConfig, &buf)
+			_, err = createValidatingWebhookConfig(client, exampleValidatingConfig, &buf)
 			if err != nil {
 				t.Fatalf("%v: error when creating ValidatingWebhookConfiguration: %v", tcName, err)
 			}
@@ -631,13 +640,7 @@ func TestDisplayValidationWebhookConfig(t *testing.T) {
 	for tcName, tc := range testCases {
 		client := fake.NewSimpleClientset()
 		if tc.createValidatingWebhookConfig {
-			webhookConfig, err := buildValidatingWebhookConfig(
-				[]byte(exampleCACert),
-				"./testdata/webhook/example-validating-webhook-config.yaml")
-			if err != nil {
-				t.Fatalf("%v: err when build validatingwebhookconfiguration: %v", tcName, err)
-			}
-			_, err = createValidatingWebhookConfig(client, webhookConfig, &buf)
+			_, err := createValidatingWebhookConfig(client, exampleValidatingConfig, &buf)
 			if err != nil {
 				t.Fatalf("%v: error when creating validatingwebhookconfiguration: %v", tcName, err)
 			}
@@ -770,13 +773,7 @@ func TestDisplayWebhookConfig(t *testing.T) {
 	for tcName, tc := range testCases {
 		client := fake.NewSimpleClientset()
 		if tc.createValidatingWebhookConfig {
-			webhookConfig, err := buildValidatingWebhookConfig(
-				[]byte(exampleCACert),
-				"./testdata/webhook/example-validating-webhook-config.yaml")
-			if err != nil {
-				t.Fatalf("%v: err when build validatingwebhookconfiguration: %v", tcName, err)
-			}
-			_, err = createValidatingWebhookConfig(client, webhookConfig, &buf)
+			_, err := createValidatingWebhookConfig(client, exampleValidatingConfig, &buf)
 			if err != nil {
 				t.Fatalf("%v: error when creating validatingwebhookconfiguration: %v", tcName, err)
 			}

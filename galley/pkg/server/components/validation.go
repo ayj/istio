@@ -30,13 +30,12 @@ func NewValidation(kubeInterface kubernetes.Interface, kubeConfig string,
 	return process.ComponentFromFns(
 		// start
 		func() error {
-			webhookServerReady := make(chan struct{})
 			stopCh := make(chan struct{})
 			if params.EnableValidation {
-				go validation.RunValidation(webhookServerReady, stopCh, params, kubeInterface, kubeConfig, liveness, readiness)
+				go validation.RunValidation(stopCh, params, kubeInterface, kubeConfig, liveness, readiness)
 			}
 			if params.EnableReconcileWebhookConfiguration {
-				go validation.ReconcileWebhookConfiguration(webhookServerReady, stopCh, params, kubeConfig)
+				go validation.ReconcileWebhookConfiguration(stopCh, params, kubeConfig)
 			}
 			if params.EnableValidation || params.EnableReconcileWebhookConfiguration {
 				go cmd.WaitSignal(stopCh)

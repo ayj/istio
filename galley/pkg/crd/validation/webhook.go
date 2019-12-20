@@ -316,7 +316,7 @@ func (wh *Webhook) Stop() {
 }
 
 // Run implements the webhook server
-func (wh *Webhook) Run(ready chan<- struct{}, stopCh <-chan struct{}) {
+func (wh *Webhook) Run(stopCh <-chan struct{}) {
 	if wh.server == nil {
 		// Externally managed
 		return
@@ -329,20 +329,6 @@ func (wh *Webhook) Run(ready chan<- struct{}, stopCh <-chan struct{}) {
 	defer func() {
 		wh.Stop()
 	}()
-
-	// During initial Istio installation its possible for custom
-	// resources to be created concurrently with galley startup. This
-	// can lead to validation failures with "no endpoints available"
-	// if the webhook is registered before the endpoint is visible to
-	// the rest of the system. Minimize this problem by waiting for the
-	// galley endpoint to be available at least once before
-	// self-registering. Subsequent Istio upgrades rely on deployment
-	// rolling updates to set maxUnavailable to zero.
-	if shutdown := wh.waitForEndpointReady(stopCh); shutdown {
-		return
-	}
-
-	ready <- struct{}{}
 
 	// use a timer to debounce key/cert updates
 	var keyCertTimerC <-chan time.Time

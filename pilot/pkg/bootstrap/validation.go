@@ -62,8 +62,6 @@ func (s *Server) initConfigValidation(args *PilotArgs) error {
 		Mux:                                 s.mux,
 	}
 
-	webhookServerReady := make(chan struct{}, 1)
-
 	// TODO - plumb webhook readiness through to Pilot's readiness
 	readinessOptions := probe.Options{
 		Path:           "TODO",
@@ -72,7 +70,7 @@ func (s *Server) initConfigValidation(args *PilotArgs) error {
 	readiness := components.NewProbe(&readinessOptions)
 
 	s.addStartFunc(func(stop <-chan struct{}) error {
-		validation.RunValidation(webhookServerReady, stop, params, (kubernetes.Interface)(nil),
+		validation.RunValidation(stop, params, (kubernetes.Interface)(nil),
 			args.Config.KubeConfig, nil, readiness.Controller())
 		return nil
 	})

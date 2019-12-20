@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"os"
 	"path/filepath"
 	"reflect"
 	"time"
@@ -29,7 +28,6 @@ import (
 	"github.com/ghodss/yaml"
 	"github.com/howeyc/fsnotify"
 	"k8s.io/api/admissionregistration/v1beta1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,6 +37,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"istio.io/istio/pkg/kube"
+	"istio.io/istio/pkg/webhook"
+
 	"istio.io/pkg/log"
 )
 
@@ -236,56 +236,11 @@ func rebuildWebhookConfigHelper(
 	caFile, webhookConfigFile, webhookName string,
 	ownerRefs []metav1.OwnerReference,
 ) (*v1beta1.ValidatingWebhookConfiguration, error) {
-	// load and validate configuration
-	webhookConfigData, err := ioutil.ReadFile(webhookConfigFile)
-	if err != nil {
-		return nil, err
-	}
-	var webhookConfig v1beta1.ValidatingWebhookConfiguration
-	if err := yaml.Unmarshal(webhookConfigData, &webhookConfig); err != nil {
-		return nil, fmt.Errorf("could not decode validatingwebhookconfiguration from %v: %v",
-			webhookConfigFile, err)
-	}
-
-	// fill in missing defaults to minimize desired vs. actual diffs later.
-	for i := 0; i < len(webhookConfig.Webhooks); i++ {
-		if webhookConfig.Webhooks[i].FailurePolicy == nil {
-			failurePolicy := v1beta1.Fail
-			webhookConfig.Webhooks[i].FailurePolicy = &failurePolicy
-		}
-		if webhookConfig.Webhooks[i].NamespaceSelector == nil {
-			webhookConfig.Webhooks[i].NamespaceSelector = &metav1.LabelSelector{}
-		}
-	}
-
-	// the webhook name is fixed at startup time
-	webhookConfig.Name = webhookName
-
-	// update ownerRefs so configuration is cleaned up when the galley's namespace is deleted.
-	webhookConfig.OwnerReferences = ownerRefs
-
-	in, err := os.Open(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read ca bundle from %v: %v", caFile, err)
-	}
-	defer in.Close() // nolint: errcheck
-
-	caPem, err := loadCaCertPem(in)
-	if err != nil {
-		return nil, err
-	}
-
-	// patch the ca-cert into the user provided configuration
-	for i := range webhookConfig.Webhooks {
-		webhookConfig.Webhooks[i].ClientConfig.CABundle = caPem
-	}
-
-	return &webhookConfig, nil
+	return webhook.BuildValidatingWebhookConfigurationFromFiles(caFile, webhookConfigFile, ownerRefs)
 }
 
 // NewWebhookConfigController manages validating webhook configuration.
 func NewWebhookConfigController(p WebhookParameters) (*WebhookConfigController, error) {
-
 	// Configuration must be updated whenever the caBundle changes. watch the parent directory of
 	// the target files so we can catch symlink updates of k8s secrets.
 	fileWatcher, err := fsnotify.NewWatcher()
@@ -307,20 +262,7 @@ func NewWebhookConfigController(p WebhookParameters) (*WebhookConfigController, 
 
 	// TODO - attach istiod webhook to pilot.
 	galleyClusterRoleName := "istio-galley-" + whc.webhookParameters.DeploymentAndServiceNamespace
-	galleyClusterRole, err := whc.webhookParameters.Clientset.RbacV1().ClusterRoles().Get(
-		galleyClusterRoleName, metav1.GetOptions{})
-	if err != nil {
-		scope.Warnf("Could not find clusterrole: %s to set ownerRef. "+
-			"The validatingwebhookconfiguration must be deleted manually.",
-			galleyClusterRoleName)
-	} else {
-		whc.ownerRefs = []metav1.OwnerReference{
-			*metav1.NewControllerRef(
-				galleyClusterRole,
-				rbacv1.SchemeGroupVersion.WithKind("ClusterRole"),
-			),
-		}
-	}
+	whc.ownerRefs = webhook.FindClusterRoleOwnerRefs(whc.webhookParameters.Clientset, galleyClusterRoleName)
 
 	return whc, nil
 }
@@ -395,8 +337,7 @@ func (whc *WebhookConfigController) reconcile(stopCh <-chan struct{}) {
 }
 
 // ReconcileWebhookConfiguration reconciles the ValidatingWebhookConfiguration when the webhook server is ready
-func ReconcileWebhookConfiguration(webhookServerReady, stopCh <-chan struct{},
-	vc *WebhookParameters, kubeConfig string) {
+func ReconcileWebhookConfiguration(stopCh <-chan struct{}, vc *WebhookParameters, kubeConfig string) {
 
 	clientset, err := kube.CreateClientset(kubeConfig, "")
 	if err != nil {
@@ -410,9 +351,18 @@ func ReconcileWebhookConfiguration(webhookServerReady, stopCh <-chan struct{},
 	}
 
 	if vc.EnableValidation {
-		//wait for galley endpoint to be available before register ValidatingWebhookConfiguration
-		<-webhookServerReady
+		// During initial Istio installation its possible for custom
+		// resources to be created concurrently with galley startup. This
+		// can lead to validation failures with "no endpoints available"
+		// if the webhook is registered before the endpoint is visible to
+		// the rest of the system. Minimize this problem by waiting for the
+		// galley endpoint to be available at least once before
+		// self-registering. Subsequent Istio upgrades rely on deployment
+		// rolling updates to set maxUnavailable to zero.
+		shutdown := webhook.WaitForEndpointReady(stopCh, vc.Clientset, vc.ServiceName, vc.DeploymentAndServiceNamespace)
+		if shutdown {
+			return
+		}
 	}
 	whc.reconcile(stopCh)
-
 }

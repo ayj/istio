@@ -15,13 +15,10 @@
 package validation
 
 import (
-	"bytes"
-	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/ghodss/yaml"
@@ -450,53 +447,6 @@ func TestReloadConfig(t *testing.T) {
 	g.Eventually(func() bool {
 		return *whc.webhookConfiguration.Webhooks[0].FailurePolicy == failurePolicyIgnoreVal
 	}, "10s", "100ms").Should(gomega.BeTrue())
-}
-
-func TestLoadCaCertPem(t *testing.T) {
-	cases := []struct {
-		name      string
-		want      []byte
-		wantError bool
-	}{
-		{
-			name:      "valid pem",
-			want:      testcerts.CACert,
-			wantError: false,
-		},
-		{
-			name:      "pem decode error",
-			want:      append([]byte("-----foo"), testcerts.CACert...),
-			wantError: true,
-		},
-		{
-			name:      "pem wrong type",
-			want:      []byte(strings.Replace(string(testcerts.CACert), "CERTIFICATE", "MALFORMED", -1)),
-			wantError: true,
-		},
-		{
-			name:      "invalid x509",
-			want:      testcerts.BadCert,
-			wantError: true,
-		},
-	}
-
-	for i, c := range cases {
-		t.Run(fmt.Sprintf("[%v] %s", i, c.name), func(tt *testing.T) {
-			got, err := loadCaCertPem(bytes.NewReader(c.want))
-			if err != nil {
-				if !c.wantError {
-					tt.Fatalf("unexpected error: got error %q", err)
-				}
-			} else {
-				if c.wantError {
-					tt.Fatal("expected error")
-				}
-				if !reflect.DeepEqual(got, c.want) {
-					tt.Fatalf("got wrong ca pem: \ngot %v \nwant %s", string(got), string(c.want))
-				}
-			}
-		})
-	}
 }
 
 func TestInitialConfigLoadError(t *testing.T) {
