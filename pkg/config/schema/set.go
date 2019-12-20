@@ -45,6 +45,15 @@ func (s Set) GetByType(name string) (Instance, bool) {
 	return Instance{}, false
 }
 
+func (s Set) GetByKind(kind string) (Instance, bool) {
+	for _, i := range s {
+		if i.VariableName == kind {
+			return i, true
+		}
+	}
+	return Instance{}, false
+}
+
 // Validate checks that each name conforms to the spec and has a schema Instance
 func (s Set) Validate() error {
 	var errs error

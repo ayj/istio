@@ -20,7 +20,6 @@ import (
 
 	"istio.io/pkg/env"
 	"istio.io/pkg/probe"
-	"k8s.io/client-go/kubernetes"
 
 	"istio.io/istio/galley/pkg/crd/validation"
 	"istio.io/istio/galley/pkg/server/components"
@@ -70,8 +69,7 @@ func (s *Server) initConfigValidation(args *PilotArgs) error {
 	readiness := components.NewProbe(&readinessOptions)
 
 	s.addStartFunc(func(stop <-chan struct{}) error {
-		validation.RunValidation(stop, params, (kubernetes.Interface)(nil),
-			args.Config.KubeConfig, nil, readiness.Controller())
+		validation.RunValidation(stop, params, nil, readiness.Controller())
 		return nil
 	})
 

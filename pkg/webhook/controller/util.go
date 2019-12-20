@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package webhook
+package controller
 
 import (
 	"crypto/x509"
@@ -28,6 +28,7 @@ import (
 	kubeApiRbac "k8s.io/api/rbac/v1"
 	kubeApiMeta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	endpointsInformerV1 "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
@@ -148,38 +149,35 @@ func WaitForEndpointReady(stopCh <-chan struct{}, client kubernetes.Interface, s
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 	defer queue.ShutDown()
 
-	store, controller := cache.NewInformer(
-		wh.createInformerEndpointSource(client, namespace, service),
-		&kubeApiCore.Endpoints{},
-		0,
-		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
-				if key, err := cache.MetaNamespaceKeyFunc(obj); err == nil {
-					queue.Add(key)
-				}
-			},
-			UpdateFunc: func(prev, curr interface{}) {
-				prevObj := prev.(*kubeApiCore.Endpoints)
-				currObj := curr.(*kubeApiCore.Endpoints)
-				if prevObj.ResourceVersion != currObj.ResourceVersion {
-					if key, err := cache.MetaNamespaceKeyFunc(curr); err == nil {
-						queue.Add(key)
-					}
-				}
-			},
-			DeleteFunc: func(obj interface{}) {
-				if key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj); err == nil {
-					queue.Add(key)
-				}
-			},
+	informer := endpointsInformerV1.NewEndpointsInformer(client, namespace, 0,
+		cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+	informer.AddEventHandler(&cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			if key, err := cache.MetaNamespaceKeyFunc(obj); err == nil {
+				queue.Add(key)
+			}
 		},
-	)
+		UpdateFunc: func(prev, curr interface{}) {
+			prevObj := prev.(*kubeApiCore.Endpoints)
+			currObj := curr.(*kubeApiCore.Endpoints)
+			if prevObj.ResourceVersion != currObj.ResourceVersion {
+				if key, err := cache.MetaNamespaceKeyFunc(curr); err == nil {
+					queue.Add(key)
+				}
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			if key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj); err == nil {
+				queue.Add(key)
+			}
+		},
+	})
 
 	controllerStopCh := make(chan struct{})
 	defer close(controllerStopCh)
-	go controller.Run(controllerStopCh)
+	go informer.Run(controllerStopCh)
 
-	if !cache.WaitForCacheSync(stopCh, controller.HasSynced) {
+	if !cache.WaitForCacheSync(stopCh, informer.HasSynced) {
 		scope.Errorf("wait for cache sync failed")
 		return true
 	}
@@ -196,7 +194,7 @@ func WaitForEndpointReady(stopCh <-chan struct{}, client kubernetes.Interface, s
 				}
 				defer queue.Done(key)
 
-				item, exists, err := store.GetByKey(key.(string))
+				item, exists, err := informer.GetStore().GetByKey(key.(string))
 				if err != nil || !exists {
 					return false, false
 				}

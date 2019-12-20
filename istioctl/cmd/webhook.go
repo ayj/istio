@@ -32,7 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"istio.io/istio/pkg/webhook"
+	"istio.io/istio/pkg/webhook/controller"
 )
 
 const (
@@ -436,7 +436,7 @@ func enableValidationWebhookConfig(client kubernetes.Interface, caCert []byte, o
 	if err != nil {
 		return fmt.Errorf("err when build mutatingwebhookconfiguration: %v", err)
 	}
-	webhookConfig, err := webhook.BuildValidatingWebhookConfiguration(caCert, configBytes, nil)
+	webhookConfig, err := controller.BuildValidatingWebhookConfiguration(caCert, configBytes, nil)
 	if err != nil {
 		return fmt.Errorf("err when build mutatingwebhookconfiguration: %v", err)
 	}
@@ -544,7 +544,7 @@ func readCACert(client kubernetes.Interface, certPath, secretName, secretNamespa
 				caCertServiceAccountNamespace, caCertServiceAccount, err)
 		}
 	}
-	if err = webhook.VerifyCABundle(caCert); err != nil {
+	if err = controller.VerifyCABundle(caCert); err != nil {
 		return nil, fmt.Errorf("ca certificate is invalid: %v", err)
 	}
 
@@ -566,7 +566,7 @@ func readCACert(client kubernetes.Interface, certPath, secretName, secretNamespa
 			time.Sleep(2 * time.Second)
 		}
 	}
-	if err = webhook.VerifyCABundle(cert); err != nil {
+	if err = controller.VerifyCABundle(cert); err != nil {
 		return nil, fmt.Errorf("webhook certificate is invalid: %v", err)
 	}
 	if err = veriyCertChain(cert, caCert); err != nil {
@@ -578,24 +578,14 @@ func readCACert(client kubernetes.Interface, certPath, secretName, secretNamespa
 }
 
 func waitForServerRunning(client kubernetes.Interface, namespace, svc string, maxWaitTime time.Duration, writer io.Writer) error {
-	startTime := time.Now()
-	timerCh := time.After(maxWaitTime - time.Since(startTime))
-	// TODO (lei-tang): the retry here may be implemented through another retry mechanism.
-	for {
-		// Check the webhook's endpoint to see if it is ready. The webhook's readiness probe reflects the readiness of
-		// its https server.
-		err := isEndpointReady(client, svc, namespace)
-		if err == nil {
-			fmt.Fprintf(writer, "the server at %v/%v is running\n", namespace, svc)
-			break
-		}
-		fmt.Fprintf(writer, "the server at %v/%v is not running: %v\n", namespace, svc, err)
-		select {
-		case <-timerCh:
-			return fmt.Errorf("the server at %v/%v is not running within %v", namespace, svc, maxWaitTime)
-		default:
-			time.Sleep(2 * time.Second)
-		}
+	stop := make(chan struct{})
+	go func() {
+		time.Sleep(maxWaitTime)
+		close(stop)
+	}()
+	shutdown := controller.WaitForEndpointReady(stop, client, svc, namespace)
+	if shutdown {
+		return fmt.Errorf("endpoint not ready within %v", maxWaitTime)
 	}
 	return nil
 }
@@ -621,19 +611,6 @@ func buildMutatingWebhookConfig(
 	}
 
 	return &webhookConfig, nil
-}
-
-// Return nil when the endpoint is ready. Otherwise, return an error.
-func isEndpointReady(client kubernetes.Interface, svc, namespace string) error {
-	ep, err := client.CoreV1().Endpoints(namespace).Get(svc, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	ready, reason := webhook.EndpointReady(ep)
-	if !ready {
-		return fmt.Errorf("%v/%v endpoint not ready: %v", namespace, svc, reason)
-	}
-	return nil
 }
 
 // Read secret of a service account.
@@ -674,21 +651,6 @@ func readCertFromSecret(client kubernetes.Interface, name, namespace string) ([]
 		return nil, fmt.Errorf("secret %v/%v does not contain %v", namespace, name, certKeyInK8sSecret)
 	}
 	return d, nil
-}
-
-// Return nil if certificate is valid. Otherwise, return an error.
-func checkCertificate(cert []byte) error {
-	b, _ := pem.Decode(cert)
-	if b == nil {
-		return fmt.Errorf("could not decode pem")
-	}
-	if b.Type != "CERTIFICATE" {
-		return fmt.Errorf("ca certificate contains wrong type: %v", b.Type)
-	}
-	if _, err := x509.ParseCertificate(b.Bytes); err != nil {
-		return fmt.Errorf("ca certificate parsing returns an error: %v", err)
-	}
-	return nil
 }
 
 // Verify the cert is issued by the CA cert.

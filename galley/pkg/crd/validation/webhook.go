@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/client-go/kubernetes"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 
@@ -117,7 +118,7 @@ type WebhookParameters struct {
 	// used to verify endpoint readiness before registering the validatingwebhookconfiguration.
 	ServiceName string
 
-	Clientset clientset.Interface
+	Clientset kubernetes.Interface
 
 	// Enable galley validation mode
 	EnableValidation bool
@@ -192,7 +193,6 @@ type Webhook struct {
 	validator store.BackendValidator
 
 	server                        *http.Server
-	clientset                     clientset.Interface
 	deploymentAndServiceNamespace string
 	deploymentName                string
 	serviceName                   string
@@ -251,7 +251,6 @@ func NewWebhook(p WebhookParameters) (*Webhook, error) {
 		wh := &Webhook{
 			descriptor:                    p.PilotDescriptor,
 			validator:                     p.MixerValidator,
-			clientset:                     p.Clientset,
 			deploymentName:                p.DeploymentName,
 			serviceName:                   p.ServiceName,
 			webhookName:                   p.WebhookName,

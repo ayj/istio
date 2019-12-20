@@ -18,7 +18,7 @@ import (
 	"bytes"
 	"testing"
 
-	"istio.io/istio/pkg/webhook"
+	"istio.io/istio/pkg/webhook/controller"
 	"istio.io/istio/security/pkg/pki/ca"
 
 	"k8s.io/api/admissionregistration/v1beta1"
@@ -104,37 +104,10 @@ var (
 
 func init() {
 	var err error
-	exampleValidatingConfig, err = webhook.BuildValidatingWebhookConfiguration(
+	exampleValidatingConfig, err = controller.BuildValidatingWebhookConfiguration(
 		[]byte(exampleCACert), []byte(exampleValidatingConfigString), nil)
 	if err != nil {
 		panic("failed to build test data")
-	}
-}
-
-func TestCheckCertificate(t *testing.T) {
-	testCases := map[string]struct {
-		cert       string
-		shouldFail bool
-	}{
-		"cert valid": {
-			cert:       exampleCACert,
-			shouldFail: false,
-		},
-		"cert invalid": {
-			cert:       "invalid-cert",
-			shouldFail: true,
-		},
-	}
-
-	for tcName, tc := range testCases {
-		err := checkCertificate([]byte(tc.cert))
-		if tc.shouldFail {
-			if err == nil {
-				t.Errorf("%v: should have failed", tcName)
-			}
-		} else if err != nil {
-			t.Errorf("%v: should not fail, but err: %v", tcName, err)
-		}
 	}
 }
 

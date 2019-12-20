@@ -37,7 +37,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"istio.io/istio/pkg/kube"
-	"istio.io/istio/pkg/webhook"
+	"istio.io/istio/pkg/webhook/controller"
 
 	"istio.io/pkg/log"
 )
@@ -236,7 +236,7 @@ func rebuildWebhookConfigHelper(
 	caFile, webhookConfigFile, webhookName string,
 	ownerRefs []metav1.OwnerReference,
 ) (*v1beta1.ValidatingWebhookConfiguration, error) {
-	return webhook.BuildValidatingWebhookConfigurationFromFiles(caFile, webhookConfigFile, ownerRefs)
+	return controller.BuildValidatingWebhookConfigurationFromFiles(caFile, webhookConfigFile, ownerRefs)
 }
 
 // NewWebhookConfigController manages validating webhook configuration.
@@ -262,7 +262,7 @@ func NewWebhookConfigController(p WebhookParameters) (*WebhookConfigController, 
 
 	// TODO - attach istiod webhook to pilot.
 	galleyClusterRoleName := "istio-galley-" + whc.webhookParameters.DeploymentAndServiceNamespace
-	whc.ownerRefs = webhook.FindClusterRoleOwnerRefs(whc.webhookParameters.Clientset, galleyClusterRoleName)
+	whc.ownerRefs = controller.FindClusterRoleOwnerRefs(whc.webhookParameters.Clientset, galleyClusterRoleName)
 
 	return whc, nil
 }
@@ -338,13 +338,11 @@ func (whc *WebhookConfigController) reconcile(stopCh <-chan struct{}) {
 
 // ReconcileWebhookConfiguration reconciles the ValidatingWebhookConfiguration when the webhook server is ready
 func ReconcileWebhookConfiguration(stopCh <-chan struct{}, vc *WebhookParameters, kubeConfig string) {
-
 	clientset, err := kube.CreateClientset(kubeConfig, "")
 	if err != nil {
 		log.Fatalf("could not create k8s clientset: %v", err)
 	}
 	vc.Clientset = clientset
-
 	whc, err := NewWebhookConfigController(*vc)
 	if err != nil {
 		log.Fatalf("cannot create validation webhook config: %v", err)
@@ -359,7 +357,7 @@ func ReconcileWebhookConfiguration(stopCh <-chan struct{}, vc *WebhookParameters
 		// galley endpoint to be available at least once before
 		// self-registering. Subsequent Istio upgrades rely on deployment
 		// rolling updates to set maxUnavailable to zero.
-		shutdown := webhook.WaitForEndpointReady(stopCh, vc.Clientset, vc.ServiceName, vc.DeploymentAndServiceNamespace)
+		shutdown := controller.WaitForEndpointReady(stopCh, clientset, vc.ServiceName, vc.DeploymentAndServiceNamespace)
 		if shutdown {
 			return
 		}

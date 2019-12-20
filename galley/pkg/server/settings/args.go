@@ -21,16 +21,16 @@ import (
 
 	"google.golang.org/grpc"
 
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	"istio.io/pkg/ctrlz"
+	"istio.io/pkg/probe"
 
 	"istio.io/istio/galley/pkg/config/meta/metadata"
 	"istio.io/istio/galley/pkg/config/util/kuberesource"
 	"istio.io/istio/galley/pkg/crd/validation"
 	"istio.io/istio/pkg/keepalive"
 	"istio.io/istio/pkg/mcp/creds"
-	"istio.io/pkg/ctrlz"
-	"istio.io/pkg/probe"
 )
 
 const (
@@ -49,9 +49,6 @@ const (
 type Args struct { // nolint:maligned
 	// The path to kube configuration file.
 	KubeConfig string
-
-	// KubeInterface has an already created K8S interface, will be reused instead of creating a new one
-	KubeInterface *kubernetes.Clientset
 
 	// InsecureGRPC is an existing GRPC server, will be used by Galley instead of creating its own
 	InsecureGRPC *grpc.Server
