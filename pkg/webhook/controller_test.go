@@ -266,22 +266,18 @@ func TestController_Greenfield(t *testing.T) {
 
 	g.Consistently(func() interface{} {
 		return second(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
-	}).Should(MatchError(configNotFoundErr))
+	}).Should(MatchError(configNotFoundErr), "webhook should not exist before endpoint creation")
 
-	g.Expect(second(c.o.Client.CoreV1().Endpoints(c.o.WatchedNamespace).Create(istiodEndpoint))).Should(Succeed())
-
-	g.Eventually(func() interface{} {
-		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
-	}, time.Second).Should(Equal(finalIstiodWebhookConfig))
+	g.Expect(second(c.Endpoints().Create(istiodEndpoint))).Should(Succeed())
 
 	g.Eventually(func() interface{} {
 		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
-	}, time.Second).Should(Equal(finalIstiodWebhookConfig))
+	}, time.Second).Should(Equal(finalIstiodWebhookConfig), "webhook should exist after endpoint is ready")
 }
 
 const timeout = 1000 * time.Millisecond
 
-func TestController_Upgrade(t *testing.T) {
+func TestController_UpgradeDowngrade(t *testing.T) {
 	g := NewGomegaWithT(t)
 	c := createTestController()
 
@@ -294,29 +290,87 @@ func TestController_Upgrade(t *testing.T) {
 	g.Expect(second(c.Deployments().Create(galleyDeployment))).Should(Succeed())
 	g.Expect(second(c.ValidatingWebhookConfigurations().Create(galleyWebhookConfig))).Should(Succeed())
 
-	g.Eventually(c.reconcileAttempts).Should(Equal(3)) // includes initial kickstart
+	g.Eventually(c.reconcileAttempts, timeout).Should(Equal(3)) // includes initial kickstart
 
-	g.Expect(second(c.o.Client.CoreV1().Endpoints(c.o.WatchedNamespace).Create(istiodEndpoint))).Should(Succeed())
+	g.Expect(second(c.Endpoints().Create(istiodEndpoint))).Should(Succeed())
 	g.Consistently(func() interface{} {
 		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
-	}, time.Second).Should(Equal(galleyWebhookConfig), "galley webhook should exist when istiod is deployed")
+	}, time.Second).Should(Equal(galleyWebhookConfig),
+		"galley webhook should exist when istiod is deployed")
 
 	g.Expect(c.Deployments().Delete(galleyDeploymentName, &kubeApisMeta.DeleteOptions{})).Should(Succeed())
 	g.Eventually(func() interface{} {
 		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
-	}, time.Second).Should(Equal(finalIstiodWebhookConfig), "istio webhook should exist when galley is removed")
+	}, time.Second).Should(Equal(finalIstiodWebhookConfig),
+		"istio webhook should exist when galley is removed")
 
 	g.Expect(second(c.Deployments().Create(galleyDeployment))).Should(Succeed())
 	g.Expect(second(c.ValidatingWebhookConfigurations().Update(galleyWebhookConfig))).Should(Succeed())
 	g.Consistently(func() interface{} {
 		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
-	}, time.Second).Should(Equal(galleyWebhookConfig), "galley webhook should exist when galley is reployed")
+	}, time.Second).Should(Equal(galleyWebhookConfig),
+		"galley webhook should exist when galley is reployed")
 
 	galleyDeploymentWithZeroReplicas := galleyDeployment.DeepCopy()
 	galleyDeploymentWithZeroReplicas.Spec.Replicas = &[]int32{0}[0]
 	g.Expect(second(c.Deployments().Update(galleyDeploymentWithZeroReplicas))).Should(Succeed())
 	g.Eventually(func() interface{} {
 		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
-	}, time.Second).Should(Equal(finalIstiodWebhookConfig), "istio webhook should exist with zero galley replicas")
+	}, time.Second).Should(Equal(finalIstiodWebhookConfig),
+		"istio webhook should exist with zero galley replicas")
+
+	g.Expect(c.Deployments().Delete(galleyDeploymentName, &kubeApisMeta.DeleteOptions{})).Should(Succeed())
+	g.Eventually(func() interface{} {
+		return first(c.ValidatingWebhookConfigurations().Get(galleyWebhookName, kubeApisMeta.GetOptions{}))
+	}, time.Second).Should(Equal(finalIstiodWebhookConfig),
+		"istio webhook should exist when zero-replica galley is removed")
+}
+
+func TestController_EndpointReadiness(t *testing.T) {
+	g := NewGomegaWithT(t)
+	c := createTestController()
+
+	endpoint := &kubeApiCore.Endpoints{
+		ObjectMeta: kubeApisMeta.ObjectMeta{
+			Name:      istiod,
+			Namespace: namespace,
+		},
+		Subsets: []kubeApiCore.EndpointSubset{},
+	}
+
+	//// start the informers directly so the fake k8s client can populate them correctly.
+	//stop := make(chan struct{})
+	//go c.sharedInformers.Start(stop)
+	//defer func() { close(stop) }()
+
+	stop := make(chan struct{})
+	defer func() { close(stop) }()
+
+	c.Start(stop)
+
+	g.Expect(first(c.processEndpoints())).Should(Equal(true),
+		"should stop if istiod endpoint resource exists")
+
+	g.Expect(second(c.Endpoints().Create(endpoint))).Should(Succeed())
+	g.Expect(first(c.processEndpoints())).Should(Equal(true),
+		"should stop if the endpoint resource exists with no subsets ")
+
+	endpoint.Subsets = []kubeApiCore.EndpointSubset{{
+		NotReadyAddresses: []kubeApiCore.EndpointAddress{{IP: "192.168.1.1"}},
+	}}
+	g.Expect(second(c.Endpoints().Update(endpoint))).Should(Succeed())
+	g.Expect(first(c.processEndpoints())).Should(Equal(true),
+		"should stop if the endpoint resource is not ready")
+
+	endpoint.Subsets = []kubeApiCore.EndpointSubset{{
+		Addresses: []kubeApiCore.EndpointAddress{{IP: "192.168.1.1"}},
+	}}
+	g.Expect(second(c.Endpoints().Update(endpoint))).Should(Succeed())
+	g.Expect(first(c.processEndpoints())).Should(Equal(false),
+		"should continue when the endpoint is ready")
+
+	g.Expect(c.Endpoints().Delete(endpoint.Name, &kubeApisMeta.DeleteOptions{})).Should(Succeed())
+	g.Expect(first(c.processEndpoints())).Should(Equal(false),
+		"should continue after endpoint is no longer ready")
 
 }
