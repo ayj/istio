@@ -16,90 +16,88 @@ package bootstrap
 
 import (
 	"path/filepath"
-	"time"
 
 	"istio.io/pkg/env"
-	"istio.io/pkg/probe"
 
 	"istio.io/istio/galley/pkg/crd/validation"
-	"istio.io/istio/galley/pkg/server/components"
-	mixervalidate "istio.io/istio/mixer/pkg/validate"
+	"istio.io/istio/mixer/pkg/validate"
 	"istio.io/istio/pkg/config/schemas"
-	"istio.io/istio/pkg/kube"
-	"istio.io/istio/pkg/webhook"
+	"istio.io/istio/pkg/webhook/controller"
 )
 
 var (
-	validationWebhookConfigName = env.RegisterStringVar("VALIDATION_WEBHOOK_NAME", "",
-		"Name of the validatingwebhookconfiguration to reconcile, if istioctl is not used.")
+	validationWebhookServer = env.RegisterBoolVar("VALIDATION_WEBHOOK_SERVER", true,
+		"Enable the configuration validation webhook server")
+	validationWebhookController = env.RegisterBoolVar("VALIDATION_WEBHOOK_CONTROLLER", true,
+		"Enable the configuration validation webhook controller")
+	validationWebhookName = env.RegisterStringVar("VALIDATION_WEBHOOK_NAME", "istio-galley",
+		"Name of the validatingwebhookconfiguration")
+	validationWebhookConfigPath = env.RegisterStringVar("VALIDATION_WEBHOOK_CONFIG_PATH",
+		"/var/lib/istio/validation/config.yaml",
+		"Full path to the validatingwebhookconfiguration file")
+	validationWebhookServiceName = env.RegisterStringVar("VALIDATION_WEBHOOK_SERVICE_NAME", "pilot",
+		"istiod service name")
+)
+
+const (
+	galleyDeploymentName = "istio-galley"
 )
 
 // TODO - move these to a common file with other istiod constants and envvars
-const (
-	validationWebhookName = "istiod"
-	webhookConfigPath     = "/var/lib/istio/validation/config.yaml"
-)
 
 func (s *Server) initConfigValidation(args *PilotArgs) error {
-	params := validation.DefaultArgs()
-	params = &validation.WebhookParameters{
-		MixerValidator:                      mixervalidate.NewDefaultValidator(false),
-		PilotDescriptor:                     schemas.Istio,
-		DomainSuffix:                        args.Config.ControllerOptions.DomainSuffix,
-		Port:                                9443, // TOOD - move to 15000 range
-		CertFile:                            filepath.Join(DNSCertDir, "cert-chain.pem"),
-		KeyFile:                             filepath.Join(DNSCertDir, "key.pem"),
-		WebhookConfigFile:                   webhookConfigPath,
-		CACertFile:                          defaultCACertPath,
-		DeploymentAndServiceNamespace:       args.Namespace,
-		WebhookName:                         validationWebhookName,
-		DeploymentName:                      "istiod",
-		ServiceName:                         "istiod",
-		Clientset:                           s.kubeClient,
-		EnableValidation:                    true, // always run the http server.
-		EnableReconcileWebhookConfiguration: validationWebhookConfigName.Get() != "",
-		Mux:                                 s.mux,
-	}
-
-	// TODO - plumb webhook readiness through to Pilot's readiness
-	readinessOptions := probe.Options{
-		Path:           "TODO",
-		UpdateInterval: time.Second, // TODO
-	}
-	readiness := components.NewProbe(&readinessOptions)
-
-	s.addStartFunc(func(stop <-chan struct{}) error {
-		validation.RunValidation(stop, params, nil, readiness.Controller())
+	if !validationWebhookServer.Get() && !validationWebhookController.Get() {
 		return nil
-	})
+	}
 
-	if validationWebhookConfigName.Get() != "" {
-		client, err := kube.CreateClientset(args.Config.KubeConfig, "")
+	if validationWebhookServer.Get() {
+		serverParams := validation.WebhookParameters{
+			MixerValidator:                validate.NewDefaultValidator(false),
+			PilotDescriptor:               schemas.Istio,
+			DomainSuffix:                  args.Config.ControllerOptions.DomainSuffix,
+			Port:                          9443, // TOOD - move to 15000 range
+			CertFile:                      filepath.Join(DNSCertDir, "cert-chain.pem"),
+			KeyFile:                       filepath.Join(DNSCertDir, "key.pem"),
+			WebhookConfigFile:             validationWebhookConfigPath.Get(),
+			CACertFile:                    defaultCACertPath,
+			DeploymentAndServiceNamespace: args.Namespace,
+			WebhookName:                   validationWebhookName.Get(),
+			DeploymentName:                validationWebhookServiceName.Get(),
+			ServiceName:                   validationWebhookServiceName.Get(),
+			Clientset:                     s.kubeClient,
+			EnableValidation:              validationWebhookServer.Get(),
+			Mux:                           s.mux,
+		}
+		c, err := validation.NewWebhook(serverParams)
 		if err != nil {
 			return err
 		}
 
-		options := webhook.Options{
-			WatchedNamespace: args.Namespace,
-			ResyncPeriod:     time.Minute,
-			CAPath:           defaultCACertPath,
-			ConfigPath:       webhookConfigPath,
-			ConfigName:       "istiod",
-			ServiceName:      "istiod",
-			Client:           client,
-		}
-		controller := webhook.New(options)
-
 		s.addStartFunc(func(stop <-chan struct{}) error {
-			go readiness.Start()
-			go func() {
-				<-stop
-				readiness.Stop()
-			}()
-
-			go controller.Start(stop)
+			go c.Run(stop)
 			return nil
 		})
 	}
+
+	if validationWebhookServer.Get() {
+		opts := controller.Options{
+			WatchedNamespace:  args.Namespace,
+			ResyncPeriod:      0,
+			CAPath:            defaultCACertPath,
+			ConfigPath:        validationWebhookConfigPath.Get(),
+			WebhookConfigName: validationWebhookName.Get(),
+			ServiceName:       "istiod",
+			Client:            s.kubeClient,
+			GalleyDeployment:  galleyDeploymentName,
+			ClusterRoleName:   "istiod-istio-system",
+		}
+		c := controller.New(opts)
+
+		s.addStartFunc(func(stop <-chan struct{}) error {
+			c.Start(stop)
+			return nil
+		})
+	}
+
 	return nil
 }

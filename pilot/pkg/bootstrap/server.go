@@ -113,9 +113,6 @@ type Server struct {
 	// TODO(nmittler): Consider alternatives to exposing these directly
 	EnvoyXdsServer *envoyv2.DiscoveryServer
 
-	// Using Clientset because client is shared with other components - galley and few others expects Clientset.
-	// TODO: change everywhere to use Interface
-	kubeClientset         *kubernetes.Clientset
 	clusterID             string
 	environment           *model.Environment
 	configController      model.ConfigStoreCache
@@ -312,11 +309,9 @@ func (s *Server) initKubeClient(args *PilotArgs) error {
 			return multierror.Prefix(kuberr, "failed to connect to Kubernetes API.")
 		}
 		s.kubeClient = client
-		s.kubeClientset = client
 		s.kubeRestConfig = kcfg
 	} else {
 		s.kubeClient = nil
-		s.kubeClientset = nil
 	}
 
 	return nil

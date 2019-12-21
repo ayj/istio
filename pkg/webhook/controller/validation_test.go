@@ -184,15 +184,15 @@ const (
 func createTestController() *fakeController {
 	fakeClient := fake.NewSimpleClientset()
 	o := Options{
-		WatchedNamespace: namespace,
-		ResyncPeriod:     time.Minute,
-		CAPath:           caPath,
-		ConfigPath:       configPath,
-		ConfigName:       galleyWebhookName,
-		ServiceName:      istiod,
-		Client:           fakeClient,
-		GalleyDeployment: galleyDeploymentName,
-		ClusterRoleName:  istiodClusterRole,
+		WatchedNamespace:  namespace,
+		ResyncPeriod:      time.Minute,
+		CAPath:            caPath,
+		ConfigPath:        configPath,
+		WebhookConfigName: galleyWebhookName,
+		ServiceName:       istiod,
+		Client:            fakeClient,
+		GalleyDeployment:  galleyDeploymentName,
+		ClusterRoleName:   istiodClusterRole,
 	}
 
 	caChanged := make(chan bool, 10)

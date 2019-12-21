@@ -202,6 +202,7 @@ type Webhook struct {
 
 	// test hook for informers
 	createInformerEndpointSource createInformerEndpointSource
+	clientset                    kubernetes.Interface
 }
 
 // Reload the server's cert/key for TLS from file and save it for later use by the https server.
