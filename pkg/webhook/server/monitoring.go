@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package validation
+package server
 
 import (
 	"context"
@@ -20,7 +20,6 @@ import (
 
 	"go.opencensus.io/stats"
 	"go.opencensus.io/stats/view"
-
 	"go.opencensus.io/tag"
 
 	admissionv1beta1 "k8s.io/api/admission/v1beta1"
@@ -76,26 +75,6 @@ var (
 		"galley/validation/http_error",
 		"Resource validation http serve errors",
 		stats.UnitDimensionless)
-	metricWebhookConfigurationUpdateError = stats.Int64(
-		"galley/validation/config_update_error",
-		"k8s webhook configuration update error",
-		stats.UnitDimensionless)
-	metricWebhookConfigurationUpdates = stats.Int64(
-		"galley/validation_config_updates",
-		"k8s webhook configuration updates",
-		stats.UnitDimensionless)
-	metricWebhookConfigurationDeleteError = stats.Int64(
-		"galley/validation/config_delete_error",
-		"k8s webhook configuration delete error",
-		stats.UnitDimensionless)
-	metricWebhookConfigurationLoadError = stats.Int64(
-		"galley/validation/config_load_error",
-		"k8s webhook configuration (re)load error",
-		stats.UnitDimensionless)
-	metricWebhookConfigurationLoad = stats.Int64(
-		"galley/validation/config_load",
-		"k8s webhook configuration (re)loads",
-		stats.UnitDimensionless)
 )
 
 func newView(measure stats.Measure, keys []tag.Key, aggregation *view.Aggregation) *view.View {
@@ -141,10 +120,6 @@ func init() {
 		newView(metricValidationPassed, resourceKeys, view.Count()),
 		newView(metricValidationFailed, resourceErrorKeys, view.Count()),
 		newView(metricValidationHTTPError, statusKey, view.Count()),
-		newView(metricWebhookConfigurationUpdateError, errorKey, view.Count()),
-		newView(metricWebhookConfigurationUpdates, noKeys, view.Count()),
-		newView(metricWebhookConfigurationLoadError, errorKey, view.Count()),
-		newView(metricWebhookConfigurationLoad, noKeys, view.Count()),
 	)
 
 	if err != nil {
@@ -184,41 +159,6 @@ func reportValidationHTTPError(status int) {
 	} else {
 		stats.Record(ctx, metricValidationHTTPError.M(1))
 	}
-}
-
-func reportValidationConfigUpdateError(err error) {
-	ctx, err := tag.New(context.Background(), tag.Insert(ErrorTag, err.Error()))
-	if err != nil {
-		scope.Errorf("Error creating monitoring context for reportValidationConfigUpdateError: %v", err)
-	} else {
-		stats.Record(ctx, metricWebhookConfigurationUpdateError.M(1))
-	}
-}
-
-func reportValidationConfigDeleteError(err error) {
-	ctx, err := tag.New(context.Background(), tag.Insert(ErrorTag, err.Error()))
-	if err != nil {
-		scope.Errorf("Error creating monitoring context for reportValidationConfigDeleteError: %v", err)
-	} else {
-		stats.Record(ctx, metricWebhookConfigurationDeleteError.M(1))
-	}
-}
-
-func reportValidationConfigLoadError(err error) {
-	ctx, err := tag.New(context.Background(), tag.Insert(ErrorTag, err.Error()))
-	if err != nil {
-		scope.Errorf("Error creating monitoring context for reportValidationConfigLoadError: %v", err)
-	} else {
-		stats.Record(ctx, metricWebhookConfigurationLoadError.M(1))
-	}
-}
-
-func reportValidationConfigLoad() {
-	stats.Record(context.Background(), metricWebhookConfigurationLoad.M(1))
-}
-
-func reportValidationConfigUpdate() {
-	stats.Record(context.Background(), metricWebhookConfigurationUpdates.M(1))
 }
 
 func reportValidationCertKeyUpdate() {

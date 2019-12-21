@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package validation
+package server
 
 import (
 	"bytes"
@@ -26,22 +26,16 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/ghodss/yaml"
 	"github.com/onsi/gomega"
 	admissionv1beta1 "k8s.io/api/admission/v1beta1"
 	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
-	v1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/cache"
-	fcache "k8s.io/client-go/tools/cache/testing"
 
 	"istio.io/istio/mixer/pkg/config/store"
 	"istio.io/istio/pilot/pkg/config/kube/crd"
@@ -58,6 +52,11 @@ const (
 	testDomainSuffix = "local.cluster"
 )
 
+var (
+	failurePolicyFailVal = admissionregistrationv1beta1.Fail
+	failurePolicyFail    = &failurePolicyFailVal
+)
+
 type fakeValidator struct{ err error }
 
 func (fv *fakeValidator) Validate(*store.BackendEvent) error {
@@ -68,79 +67,13 @@ func (fv *fakeValidator) SupportsKind(string) bool {
 	return true
 }
 
-var (
-	dummyConfig = &admissionregistrationv1beta1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "config1",
-		},
-		Webhooks: []admissionregistrationv1beta1.ValidatingWebhook{
-			{
-				Name: "hook-foo",
-				ClientConfig: admissionregistrationv1beta1.WebhookClientConfig{
-					Service: &admissionregistrationv1beta1.ServiceReference{
-						Name:      "hook1",
-						Namespace: "default",
-					},
-					CABundle: testcerts.CACert,
-				},
-				Rules: []admissionregistrationv1beta1.RuleWithOperations{
-					{
-						Operations: []admissionregistrationv1beta1.OperationType{
-							admissionregistrationv1beta1.Create,
-							admissionregistrationv1beta1.Update,
-						},
-						Rule: admissionregistrationv1beta1.Rule{
-							APIGroups:   []string{"g1"},
-							APIVersions: []string{"v1"},
-							Resources:   []string{"r1"},
-						},
-					},
-				},
-				FailurePolicy:     failurePolicyFail,
-				NamespaceSelector: &metav1.LabelSelector{},
-			},
-		},
-	}
-
-	dummyNamespace   = "istio-system"
-	dummyClusterRole = &rbacv1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "istio-galley-istio-system",
-			UID:  "deadbeef",
-		},
-	}
-
-	dummyClient = fake.NewSimpleClientset(dummyClusterRole)
-
-	createFakeWebhookSource   = fcache.NewFakeControllerSource
-	createFakeEndpointsSource = func() cache.ListerWatcher {
-		source := fcache.NewFakeControllerSource()
-		source.Add(&v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      dummyClusterRole.Name,
-				Namespace: dummyNamespace,
-			},
-			Subsets: []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: "1.2.3.4",
-				}},
-			}},
-		})
-		return source
-	}
-)
-
 func TestArgs_String(t *testing.T) {
 	p := DefaultArgs()
 	// Should not crash
 	_ = p.String()
 }
 
-func createTestWebhook(
-	t testing.TB,
-	cl clientset.Interface,
-	fakeEndpointSource cache.ListerWatcher,
-	config *admissionregistrationv1beta1.ValidatingWebhookConfiguration) (*Webhook, func()) {
+func createTestWebhook(t testing.TB) (*Webhook, func()) {
 
 	t.Helper()
 	dir, err := ioutil.TempDir("", "galley_validation_webhook")
@@ -148,15 +81,13 @@ func createTestWebhook(
 		t.Fatalf("TempDir() failed: %v", err)
 	}
 	cleanup := func() {
-		os.RemoveAll(dir) // nolint: errcheck
+		_ = os.RemoveAll(dir) // nolint: errcheck
 	}
 
 	var (
-		certFile   = filepath.Join(dir, "cert-file.yaml")
-		keyFile    = filepath.Join(dir, "key-file.yaml")
-		caFile     = filepath.Join(dir, "ca-file.yaml")
-		configFile = filepath.Join(dir, "config-file.yaml")
-		port       = uint(0)
+		certFile = filepath.Join(dir, "cert-file.yaml")
+		keyFile  = filepath.Join(dir, "key-file.yaml")
+		port     = uint(0)
 	)
 
 	// cert
@@ -169,45 +100,19 @@ func createTestWebhook(
 		cleanup()
 		t.Fatalf("WriteFile(%v) failed: %v", keyFile, err)
 	}
-	// ca
-	if err := ioutil.WriteFile(caFile, testcerts.CACert, 0644); err != nil { // nolint: vetshadow
-		cleanup()
-		t.Fatalf("WriteFile(%v) failed: %v", caFile, err)
-	}
 
-	configBytes, err := yaml.Marshal(&config)
+	options := Options{
+		CertFile:        certFile,
+		KeyFile:         keyFile,
+		Port:            port,
+		DomainSuffix:    testDomainSuffix,
+		PilotDescriptor: mock.Types,
+		MixerValidator:  &fakeValidator{},
+	}
+	wh, err := New(options)
 	if err != nil {
 		cleanup()
-		t.Fatalf("could not create fake webhook configuration data: %v", err)
-	}
-	if err := ioutil.WriteFile(configFile, configBytes, 0644); err != nil { // nolint: vetshadow
-		cleanup()
-		t.Fatalf("WriteFile(%v) failed: %v", configFile, err)
-	}
-
-	options := WebhookParameters{
-		CertFile:                      certFile,
-		KeyFile:                       keyFile,
-		Port:                          port,
-		DomainSuffix:                  testDomainSuffix,
-		PilotDescriptor:               mock.Types,
-		MixerValidator:                &fakeValidator{},
-		WebhookConfigFile:             configFile,
-		CACertFile:                    caFile,
-		Clientset:                     cl,
-		WebhookName:                   config.Name,
-		DeploymentName:                dummyClusterRole.Name,
-		ServiceName:                   dummyClusterRole.Name,
-		DeploymentAndServiceNamespace: dummyNamespace,
-	}
-	wh, err := NewWebhook(options)
-	if err != nil {
-		cleanup()
-		t.Fatalf("NewWebhook() failed: %v", err)
-	}
-
-	wh.createInformerEndpointSource = func(cl clientset.Interface, namespace, name string) cache.ListerWatcher {
-		return fakeEndpointSource
+		t.Fatalf("New() failed: %v", err)
 	}
 
 	return wh, func() {
@@ -270,7 +175,7 @@ func TestAdmitPilot(t *testing.T) {
 	invalidConfig := makePilotConfig(t, 0, false, false)
 	extraKeyConfig := makePilotConfig(t, 0, true, true)
 
-	wh, cancel := createTestWebhook(t, dummyClient, createFakeEndpointsSource(), dummyConfig)
+	wh, cancel := createTestWebhook(t)
 	defer cancel()
 
 	cases := []struct {
@@ -371,11 +276,7 @@ func makeMixerConfig(t *testing.T, i int, includeBogusKey bool) []byte {
 func TestAdmitMixer(t *testing.T) {
 	rawConfig := makeMixerConfig(t, 0, false)
 	extraKeyConfig := makeMixerConfig(t, 0, true)
-	wh, cancel := createTestWebhook(
-		t,
-		fake.NewSimpleClientset(),
-		createFakeEndpointsSource(),
-		dummyConfig)
+	wh, cancel := createTestWebhook(t)
 	defer cancel()
 
 	cases := []struct {
@@ -525,20 +426,21 @@ func makeTestReview(t *testing.T, valid bool) []byte {
 }
 
 func TestServe_Basic(t *testing.T) {
-	wh, cleanup := createTestWebhook(t,
-		fake.NewSimpleClientset(),
-		createFakeEndpointsSource(),
-		dummyConfig)
+	ready := make(chan struct{})
+	readyHook = func() {
+		ready <- struct{}{}
+	}
+	defer func() { readyHook = func() {} }()
+
+	wh, cleanup := createTestWebhook(t)
 	defer cleanup()
 
 	stop := make(chan struct{})
-	ready := make(chan struct{})
 	defer func() {
 		close(stop)
-		close(ready)
 	}()
 
-	go wh.Run(ready, stop)
+	go wh.Run(stop)
 
 	select {
 	case <-ready:
@@ -549,18 +451,13 @@ func TestServe_Basic(t *testing.T) {
 }
 
 func TestServe(t *testing.T) {
-	wh, cleanup := createTestWebhook(t,
-		fake.NewSimpleClientset(),
-		createFakeEndpointsSource(),
-		dummyConfig)
+	wh, cleanup := createTestWebhook(t)
 	defer cleanup()
 	stop := make(chan struct{})
-	ready := make(chan struct{})
 	defer func() {
 		close(stop)
 	}()
-	go wh.Run(ready, stop)
-	<-ready
+	go wh.Run(stop)
 
 	validReview := makeTestReview(t, true)
 	invalidReview := makeTestReview(t, false)
@@ -658,18 +555,13 @@ func checkCert(t *testing.T, whc *Webhook, cert, key []byte) bool {
 }
 
 func TestReloadCert(t *testing.T) {
-	wh, cleanup := createTestWebhook(t,
-		fake.NewSimpleClientset(),
-		createFakeEndpointsSource(),
-		dummyConfig)
+	wh, cleanup := createTestWebhook(t)
 	defer cleanup()
 	stop := make(chan struct{})
-	ready := make(chan struct{})
 	defer func() {
 		close(stop)
 	}()
-	go wh.Run(ready, stop)
-	<-ready
+	go wh.Run(stop)
 
 	checkCert(t, wh, testcerts.ServerCert, testcerts.ServerKey)
 	// Update cert/key files.
@@ -685,4 +577,61 @@ func TestReloadCert(t *testing.T) {
 	g.Eventually(func() bool {
 		return checkCert(t, wh, testcerts.RotatedCert, testcerts.RotatedKey)
 	}, "10s", "100ms").Should(gomega.BeTrue())
+}
+
+// scenario is a common struct used by many tests in this context.
+type scenario struct {
+	wrapFunc      func(*Options)
+	expectedError string
+}
+
+func TestValidate(t *testing.T) {
+	scenarios := map[string]scenario{
+		"valid": {
+			wrapFunc:      func(args *Options) {},
+			expectedError: "",
+		},
+		"cert unset": {
+			wrapFunc:      func(args *Options) { args.CertFile = "" },
+			expectedError: "cert file not specified",
+		},
+		"key unset": {
+			wrapFunc:      func(args *Options) { args.KeyFile = "" },
+			expectedError: "key file not specified",
+		},
+		"invalid port": {
+			wrapFunc:      func(args *Options) { args.Port = 100000 },
+			expectedError: "port number 100000 must be in the range 1..65535",
+		},
+	}
+
+	for name, scenario := range scenarios {
+		t.Run(name, func(tt *testing.T) {
+			runTestCode(name, tt, scenario)
+		})
+	}
+}
+
+func runTestCode(name string, t *testing.T, test scenario) {
+	args := DefaultArgs()
+
+	test.wrapFunc(&args)
+	err := args.Validate()
+	if err == nil && test.expectedError != "" {
+		t.Errorf("Test %q failed: expected error: %q, got nil", name, test.expectedError)
+	}
+	if err != nil {
+		if test.expectedError == "" {
+			t.Errorf("Test %q failed: expected nil error, got %v", name, err)
+		}
+		if !strings.Contains(err.Error(), test.expectedError) {
+			t.Errorf("Test %q failed: expected error: %q, got %q", name, test.expectedError, err.Error())
+		}
+	}
+
+	// Should not return error if validation disabled
+	args.Enabled = false
+	if err := args.Validate(); err != nil {
+		t.Errorf("Test %q failed with validation disabled, expected nil error, but got: %v", name, err)
+	}
 }

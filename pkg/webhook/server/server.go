@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package validation
+package server
 
 import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -27,23 +28,24 @@ import (
 	"time"
 
 	"github.com/ghodss/yaml"
+	"github.com/hashicorp/go-multierror"
 	"github.com/howeyc/fsnotify"
 	admissionv1beta1 "k8s.io/api/admission/v1beta1"
 	"k8s.io/api/admissionregistration/v1beta1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
 
 	mixerCrd "istio.io/istio/mixer/pkg/config/crd"
 	"istio.io/istio/mixer/pkg/config/store"
 	"istio.io/istio/pilot/pkg/config/kube/crd"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/schema"
+	"istio.io/pkg/log"
 )
+
+var scope = log.RegisterScope("validation", "CRD validation debugging", 0)
 
 var (
 	runtimeScheme = runtime.NewScheme()
@@ -64,16 +66,15 @@ func init() {
 	_ = v1beta1.AddToScheme(runtimeScheme)
 }
 
-const (
-	watchDebounceDelay             = 100 * time.Millisecond
-	retryUpdateAfterFailureTimeout = time.Second
+const HTTPSHandlerReadyPath = "/ready"
 
-	httpsHandlerReadyPath = "/ready"
+const (
+	watchDebounceDelay = 100 * time.Millisecond
 )
 
-// WebhookParameters contains the configuration for the Istio Pilot validation
+// Options contains the configuration for the Istio Pilot validation
 // admission controller.
-type WebhookParameters struct {
+type Options struct {
 	// MixerValidator implements the backend validator functions for mixer configuration.
 	MixerValidator store.BackendValidator
 
@@ -94,86 +95,32 @@ type WebhookParameters struct {
 	// KeyFile is the path to the x509 private key matching `CertFile`.
 	KeyFile string
 
-	// WebhookConfigFile is the path to the validatingwebhookconfiguration
-	// file that should be used for self-registration.
-	WebhookConfigFile string
-
-	// CACertFile is the path to the x509 CA bundle file.
-	CACertFile string
-
-	// DeploymentAndServiceNamespace is the namespace in which the validation deployment and service resides.
-	DeploymentAndServiceNamespace string
-
-	// Name of the k8s validatingwebhookconfiguration
-	WebhookName string
-
-	// DeploymentName is the name of the validation deployment. This, along with
-	// DeploymentAndServiceNamespace, is used to set the ownerReference in the
-	// validatingwebhookconfiguration. This enables k8s to clean-up the cluster-scoped
-	// validatingwebhookconfiguration when the deployment is deleted.
-	DeploymentName string
-
-	// ServiceName is the name of the k8s service of the validation webhook. This is
-	// used to verify endpoint readiness before registering the validatingwebhookconfiguration.
-	ServiceName string
-
-	Clientset clientset.Interface
-
 	// Enable galley validation mode
-	EnableValidation bool
-
-	// Enable reconcile validatingwebhookconfiguration
-	EnableReconcileWebhookConfiguration bool
+	Enabled bool
 
 	// Mux of an existing HTTP server, Galley will not manage its own
 	Mux *http.ServeMux
 }
 
-type createInformerEndpointSource func(cl clientset.Interface, namespace, name string) cache.ListerWatcher
-
-var (
-	defaultCreateInformerEndpointSource = func(cl clientset.Interface, namespace, name string) cache.ListerWatcher {
-		return cache.NewListWatchFromClient(
-			cl.CoreV1().RESTClient(),
-			"endpoints",
-			namespace,
-			fields.ParseSelectorOrDie(fmt.Sprintf("metadata.name=%s", name)))
-	}
-)
-
 // String produces a stringified version of the arguments for debugging.
-func (p *WebhookParameters) String() string {
+func (p *Options) String() string {
 	buf := &bytes.Buffer{}
 
 	fmt.Fprintf(buf, "DomainSuffix: %s\n", p.DomainSuffix)
 	fmt.Fprintf(buf, "Port: %d\n", p.Port)
 	fmt.Fprintf(buf, "CertFile: %s\n", p.CertFile)
 	fmt.Fprintf(buf, "KeyFile: %s\n", p.KeyFile)
-	fmt.Fprintf(buf, "WebhookConfigFile: %s\n", p.WebhookConfigFile)
-	fmt.Fprintf(buf, "CACertFile: %s\n", p.CACertFile)
-	fmt.Fprintf(buf, "DeploymentAndServiceNamespace: %s\n", p.DeploymentAndServiceNamespace)
-	fmt.Fprintf(buf, "WebhookName: %s\n", p.WebhookName)
-	fmt.Fprintf(buf, "DeploymentName: %s\n", p.DeploymentName)
-	fmt.Fprintf(buf, "ServiceName: %s\n", p.ServiceName)
-	fmt.Fprintf(buf, "EnableValidation: %v\n", p.EnableValidation)
-	fmt.Fprintf(buf, "EnableReconcileWebhookConfiguration: %v\n", p.EnableReconcileWebhookConfiguration)
 
 	return buf.String()
 }
 
-// DefaultArgs allocates an WebhookParameters struct initialized with Webhook's default configuration.
-func DefaultArgs() *WebhookParameters {
-	return &WebhookParameters{
-		Port:                                9443,
-		CertFile:                            constants.DefaultCertChain,
-		KeyFile:                             constants.DefaultKey,
-		CACertFile:                          constants.DefaultRootCert,
-		DeploymentAndServiceNamespace:       "istio-system",
-		DeploymentName:                      "istio-galley",
-		ServiceName:                         "istio-galley",
-		WebhookName:                         "istio-galley",
-		EnableValidation:                    true,
-		EnableReconcileWebhookConfiguration: true,
+// DefaultArgs allocates an Options struct initialized with Webhook's default configuration.
+func DefaultArgs() Options {
+	return Options{
+		Port:     9443,
+		CertFile: constants.DefaultCertChain,
+		KeyFile:  constants.DefaultKey,
+		Enabled:  true,
 	}
 }
 
@@ -191,17 +138,9 @@ type Webhook struct {
 	// mixer
 	validator store.BackendValidator
 
-	server                        *http.Server
-	clientset                     clientset.Interface
-	deploymentAndServiceNamespace string
-	deploymentName                string
-	serviceName                   string
-	webhookName                   string
-	keyFile                       string
-	certFile                      string
-
-	// test hook for informers
-	createInformerEndpointSource createInformerEndpointSource
+	server   *http.Server
+	keyFile  string
+	certFile string
 }
 
 // Reload the server's cert/key for TLS from file and save it for later use by the https server.
@@ -245,18 +184,12 @@ func reloadKeyCert(certFile, keyFile string) (*tls.Certificate, error) {
 	return &pair, nil
 }
 
-// NewWebhook creates a new instance of the admission webhook controller.
-func NewWebhook(p WebhookParameters) (*Webhook, error) {
+// New creates a new instance of the admission webhook server.
+func New(p Options) (*Webhook, error) {
 	if p.Mux != nil {
 		wh := &Webhook{
-			descriptor:                    p.PilotDescriptor,
-			validator:                     p.MixerValidator,
-			clientset:                     p.Clientset,
-			deploymentName:                p.DeploymentName,
-			serviceName:                   p.ServiceName,
-			webhookName:                   p.WebhookName,
-			deploymentAndServiceNamespace: p.DeploymentAndServiceNamespace,
-			createInformerEndpointSource:  defaultCreateInformerEndpointSource,
+			descriptor: p.PilotDescriptor,
+			validator:  p.MixerValidator,
 		}
 
 		p.Mux.HandleFunc("/admitpilot", wh.serveAdmitPilot)
@@ -285,18 +218,12 @@ func NewWebhook(p WebhookParameters) (*Webhook, error) {
 		server: &http.Server{
 			Addr: fmt.Sprintf(":%v", p.Port),
 		},
-		keyFile:                       p.KeyFile,
-		certFile:                      p.CertFile,
-		keyCertWatcher:                keyCertWatcher,
-		cert:                          pair,
-		descriptor:                    p.PilotDescriptor,
-		validator:                     p.MixerValidator,
-		clientset:                     p.Clientset,
-		deploymentName:                p.DeploymentName,
-		serviceName:                   p.ServiceName,
-		webhookName:                   p.WebhookName,
-		deploymentAndServiceNamespace: p.DeploymentAndServiceNamespace,
-		createInformerEndpointSource:  defaultCreateInformerEndpointSource,
+		keyFile:        p.KeyFile,
+		certFile:       p.CertFile,
+		keyCertWatcher: keyCertWatcher,
+		cert:           pair,
+		descriptor:     p.PilotDescriptor,
+		validator:      p.MixerValidator,
 	}
 
 	// mtls disabled because apiserver webhook cert usage is still TBD.
@@ -304,7 +231,7 @@ func NewWebhook(p WebhookParameters) (*Webhook, error) {
 	h := http.NewServeMux()
 	h.HandleFunc("/admitpilot", wh.serveAdmitPilot)
 	h.HandleFunc("/admitmixer", wh.serveAdmitMixer)
-	h.HandleFunc(httpsHandlerReadyPath, wh.serveReady)
+	h.HandleFunc(HTTPSHandlerReadyPath, wh.serveReady)
 	wh.server.Handler = h
 
 	return wh, nil
@@ -315,8 +242,10 @@ func (wh *Webhook) Stop() {
 	wh.server.Close() // nolint: errcheck
 }
 
+var readyHook = func() {}
+
 // Run implements the webhook server
-func (wh *Webhook) Run(ready chan<- struct{}, stopCh <-chan struct{}) {
+func (wh *Webhook) Run(stopCh <-chan struct{}) {
 	if wh.server == nil {
 		// Externally managed
 		return
@@ -330,19 +259,9 @@ func (wh *Webhook) Run(ready chan<- struct{}, stopCh <-chan struct{}) {
 		wh.Stop()
 	}()
 
-	// During initial Istio installation its possible for custom
-	// resources to be created concurrently with galley startup. This
-	// can lead to validation failures with "no endpoints available"
-	// if the webhook is registered before the endpoint is visible to
-	// the rest of the system. Minimize this problem by waiting for the
-	// galley endpoint to be available at least once before
-	// self-registering. Subsequent Istio upgrades rely on deployment
-	// rolling updates to set maxUnavailable to zero.
-	if shutdown := wh.waitForEndpointReady(stopCh); shutdown {
-		return
+	if readyHook != nil {
+		readyHook()
 	}
-
-	ready <- struct{}{}
 
 	// use a timer to debounce key/cert updates
 	var keyCertTimerC <-chan time.Time
@@ -548,4 +467,34 @@ func checkFields(raw []byte, kind string, namespace string, name string) (string
 	}
 
 	return "", nil
+}
+
+// validatePort checks that the network port is in range
+func validatePort(port int) error {
+	if 1 <= port && port <= 65535 {
+		return nil
+	}
+	return fmt.Errorf("port number %d must be in the range 1..65535", port)
+}
+
+// Validate tests if the Options has valid params.
+func (p *Options) Validate() error {
+	if p == nil {
+		return errors.New("nil Options")
+	}
+
+	var errs *multierror.Error
+	if p.Enabled {
+		if len(p.CertFile) == 0 {
+			errs = multierror.Append(errs, errors.New("cert file not specified"))
+		}
+		if len(p.KeyFile) == 0 {
+			errs = multierror.Append(errs, errors.New("key file not specified"))
+		}
+		if err := validatePort(int(p.Port)); err != nil {
+			errs = multierror.Append(errs, err)
+		}
+	}
+
+	return errs.ErrorOrNil()
 }

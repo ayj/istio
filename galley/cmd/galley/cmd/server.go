@@ -67,21 +67,18 @@ func serverCmd() *cobra.Command {
 
 			// validation tls args fall back to server arg values
 			// since the default value for these flags is an empty string, zero length indicates not set
-			if len(serverArgs.ValidationArgs.CACertFile) < 1 {
-				serverArgs.ValidationArgs.CACertFile = serverArgs.CredentialOptions.CACertificateFile
+			if serverArgs.ValidationWebhookServerArgs.CertFile == "" {
+				serverArgs.ValidationWebhookServerArgs.CertFile = serverArgs.CredentialOptions.CertificateFile
 			}
-			if len(serverArgs.ValidationArgs.CertFile) < 1 {
-				serverArgs.ValidationArgs.CertFile = serverArgs.CredentialOptions.CertificateFile
-			}
-			if len(serverArgs.ValidationArgs.KeyFile) < 1 {
-				serverArgs.ValidationArgs.KeyFile = serverArgs.CredentialOptions.KeyFile
+			if serverArgs.ValidationWebhookServerArgs.KeyFile == "" {
+				serverArgs.ValidationWebhookServerArgs.KeyFile = serverArgs.CredentialOptions.KeyFile
 			}
 
-			if !serverArgs.EnableServer && !serverArgs.ValidationArgs.EnableValidation {
+			if !serverArgs.EnableServer && !serverArgs.ValidationWebhookServerArgs.Enabled {
 				log.Fatala("Galley must be running under at least one mode: server or validation")
 			}
 
-			if err := serverArgs.ValidationArgs.Validate(); err != nil {
+			if err := serverArgs.ValidationWebhookServerArgs.Validate(); err != nil {
 				log.Fatalf("Invalid validationArgs: %v", err)
 			}
 
@@ -161,32 +158,35 @@ func serverCmd() *cobra.Command {
 	svr.PersistentFlags().BoolVar(&serverArgs.EnableConfigAnalysis, "enableAnalysis", serverArgs.EnableConfigAnalysis,
 		"Enable config analysis service")
 
-	// validation config
-	svr.PersistentFlags().StringVar(&serverArgs.ValidationArgs.WebhookConfigFile,
+	// validation webhook server config
+	svr.PersistentFlags().UintVar(&serverArgs.ValidationWebhookServerArgs.Port, "validation-port",
+		serverArgs.ValidationWebhookServerArgs.Port, "HTTPS port of the validation service.")
+	svr.PersistentFlags().BoolVar(&serverArgs.ValidationWebhookServerArgs.Enabled, "enable-validation",
+		serverArgs.ValidationWebhookServerArgs.Enabled, "Run galley validation mode")
+
+	// validation webhook controller config
+	svr.PersistentFlags().StringVar(&serverArgs.ValidationWebhookControllerArgs.WebhookConfigPath,
 		"validation-webhook-config-file", "",
 		"File that contains k8s validatingwebhookconfiguration yaml. Required if enable-validation is true.")
-	svr.PersistentFlags().UintVar(&serverArgs.ValidationArgs.Port, "validation-port",
-		serverArgs.ValidationArgs.Port, "HTTPS port of the validation service.")
-	svr.PersistentFlags().BoolVar(&serverArgs.ValidationArgs.EnableValidation, "enable-validation", serverArgs.ValidationArgs.EnableValidation,
-		"Run galley validation mode")
-	svr.PersistentFlags().BoolVar(&serverArgs.ValidationArgs.EnableReconcileWebhookConfiguration,
-		"enable-reconcileWebhookConfiguration", serverArgs.ValidationArgs.EnableReconcileWebhookConfiguration,
+	svr.PersistentFlags().BoolVar(&serverArgs.ValidationWebhookControllerArgs.Enabled,
+		"enable-reconcileWebhookConfiguration", serverArgs.ValidationWebhookControllerArgs.Enabled,
 		"Enable reconciliation for webhook configuration.")
-	svr.PersistentFlags().StringVar(&serverArgs.ValidationArgs.DeploymentAndServiceNamespace, "deployment-namespace", "istio-system",
+	svr.PersistentFlags().StringVar(&serverArgs.ValidationWebhookControllerArgs.WatchedNamespace, "deployment-namespace", "istio-system",
 		"Namespace of the deployment for the validation pod")
-	svr.PersistentFlags().StringVar(&serverArgs.ValidationArgs.DeploymentName, "deployment-name", "istio-galley",
+	_ = svr.PersistentFlags().String("deployment-name", "istio-galley",
 		"Name of the deployment for the validation pod")
-	svr.PersistentFlags().StringVar(&serverArgs.ValidationArgs.ServiceName, "service-name", "istio-galley",
+	_ = svr.PersistentFlags().MarkDeprecated("deployment-name", "")
+	svr.PersistentFlags().StringVar(&serverArgs.ValidationWebhookControllerArgs.ServiceName, "service-name", "istio-galley",
 		"Name of the validation service running in the same namespace as the deployment")
-	svr.PersistentFlags().StringVar(&serverArgs.ValidationArgs.WebhookName, "webhook-name", "istio-galley",
+	svr.PersistentFlags().StringVar(&serverArgs.ValidationWebhookControllerArgs.WebhookConfigName, "webhook-name", "istio-galley",
 		"Name of the k8s validatingwebhookconfiguration")
 
 	// Hidden, file only flags for validation specific TLS
-	svr.PersistentFlags().StringVar(&serverArgs.ValidationArgs.CertFile, "validation.tls.clientCertificate", "",
+	svr.PersistentFlags().StringVar(&serverArgs.ValidationWebhookServerArgs.CertFile, "validation.tls.clientCertificate", "",
 		"File containing the x509 Certificate for HTTPS validation.")
-	svr.PersistentFlags().StringVar(&serverArgs.ValidationArgs.KeyFile, "validation.tls.privateKey", "",
+	svr.PersistentFlags().StringVar(&serverArgs.ValidationWebhookServerArgs.KeyFile, "validation.tls.privateKey", "",
 		"File containing the x509 private key matching --validation.tls.clientCertificate.")
-	svr.PersistentFlags().StringVar(&serverArgs.ValidationArgs.CACertFile, "validation.tls.caCertificates", "",
+	svr.PersistentFlags().StringVar(&serverArgs.ValidationWebhookControllerArgs.CAPath, "validation.tls.caCertificates", "",
 		"File containing the caBundle that signed the cert/key specified by --validation.tls.clientCertificate and --validation.tls.privateKey.")
 
 	serverArgs.IntrospectionOptions.AttachCobraFlags(svr)
