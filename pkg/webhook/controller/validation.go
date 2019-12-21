@@ -22,6 +22,7 @@ import (
 
 	kubeApiAdmission "k8s.io/api/admissionregistration/v1beta1"
 	kubeApiApp "k8s.io/api/apps/v1"
+	kubeApiCore "k8s.io/api/core/v1"
 	kubeErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	kubeApiMeta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -139,6 +140,7 @@ type readFileFunc func(filename string) ([]byte, error)
 // precompute GVK for known types for the purposes of logging.
 var (
 	configGVK     = kubeApiAdmission.SchemeGroupVersion.WithKind(reflect.TypeOf(kubeApiAdmission.ValidatingWebhookConfiguration{}).Name())
+	endpointGVK   = kubeApiCore.SchemeGroupVersion.WithKind(reflect.TypeOf(kubeApiCore.Endpoints{}).Name())
 	deploymentGVK = kubeApiApp.SchemeGroupVersion.WithKind(reflect.TypeOf(kubeApiApp.Deployment{}).Name())
 )
 
@@ -162,6 +164,9 @@ func newController(
 
 	webhookInformer := c.sharedInformers.Admissionregistration().V1beta1().ValidatingWebhookConfigurations().Informer()
 	webhookInformer.AddEventHandler(makeHandler(c.queue, configGVK, o.WebhookConfigName, ""))
+
+	endpointInformer := c.sharedInformers.Core().V1().Endpoints().Informer()
+	endpointInformer.AddEventHandler(makeHandler(c.queue, endpointGVK, o.ServiceName, o.WatchedNamespace))
 
 	deploymentInformer := c.sharedInformers.Apps().V1().Deployments().Informer()
 	deploymentInformer.AddEventHandler(makeHandler(c.queue, deploymentGVK, o.GalleyDeployment, o.WatchedNamespace))
@@ -219,6 +224,22 @@ func (c *Controller) processDeployments() (stop bool, err error) {
 	return true, nil
 }
 
+func (c *Controller) processEndpoints() (stop bool, err error) {
+	if c.endpointReadyOnce {
+		return false, nil
+	}
+	endpoint, err := c.sharedInformers.Core().V1().
+		Endpoints().Lister().Endpoints(c.o.WatchedNamespace).Get(c.o.ServiceName)
+	if err != nil {
+		if kubeErrors.IsNotFound(err) {
+			return true, nil
+		}
+		return true, err
+	}
+	ready, _ := EndpointReady(endpoint)
+	return ready, nil
+}
+
 func (c *Controller) reconcile(req *reconcileRequest) error {
 	defer func() {
 		if c.reconcileDone != nil {
@@ -227,6 +248,11 @@ func (c *Controller) reconcile(req *reconcileRequest) error {
 	}()
 
 	scope.Infof("Reconcile: %v", req)
+
+	// skip reconciliation if our endpoint isn't ready ...
+	if stop, err := c.processEndpoints(); stop || err != nil {
+		return err
+	}
 
 	// ... or another galley deployment is already managed the webhook.
 	if stop, err := c.processDeployments(); stop || err != nil {

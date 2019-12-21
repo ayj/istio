@@ -439,7 +439,7 @@ func (wh *Webhook) admitPilot(request *admissionv1beta1.AdmissionRequest) *admis
 		return toAdmissionResponse(fmt.Errorf("cannot decode configuration: %v", err))
 	}
 
-	s, exists := wh.descriptor.GetByType(crd.CamelCaseToKebabCase(obj.Kind))
+	s, exists := wh.descriptor.GetByKind(obj.Kind)
 	if !exists {
 		scope.Infof("unrecognized type %v", obj.Kind)
 		reportValidationFailed(request, reasonUnknownType)
