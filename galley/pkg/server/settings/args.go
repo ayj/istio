@@ -29,9 +29,10 @@ import (
 
 	"istio.io/istio/galley/pkg/config/schema/snapshots"
 	"istio.io/istio/galley/pkg/config/util/kuberesource"
-	"istio.io/istio/galley/pkg/crd/validation"
 	"istio.io/istio/pkg/keepalive"
 	"istio.io/istio/pkg/mcp/creds"
+	"istio.io/istio/pkg/webhooks/validation/controller"
+	"istio.io/istio/pkg/webhooks/validation/server"
 )
 
 const (
@@ -144,7 +145,8 @@ type Args struct { // nolint:maligned
 	// keep-alive options for the MCP gRPC Server.
 	KeepAlive *keepalive.Options
 
-	ValidationArgs *validation.WebhookParameters
+	ValidationWebhookServerArgs     server.Options
+	ValidationWebhookControllerArgs controller.Options
 
 	Liveness        probe.Options
 	Readiness       probe.Options
@@ -178,7 +180,7 @@ func DefaultArgs() *Args {
 		ExcludedResourceKinds:       kuberesource.DefaultExcludedResourceKinds(),
 		SinkMeta:                    make([]string, 0),
 		KeepAlive:                   keepalive.DefaultOption(),
-		ValidationArgs:              validation.DefaultArgs(),
+		ValidationWebhookServerArgs: server.DefaultArgs(),
 		MonitoringPort:              15014,
 		EnableProfiling:             false,
 		PprofPort:                   9094,
