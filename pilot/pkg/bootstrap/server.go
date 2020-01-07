@@ -199,6 +199,10 @@ func NewServer(args *PilotArgs) (*Server, error) {
 		return nil, fmt.Errorf("sidecar injector: %v", err)
 	}
 
+	if err := s.initConfigValidation(args); err != nil {
+		return nil, fmt.Errorf("validation: %v", err)
+	}
+
 	s.initSDSCA(args)
 
 	// TODO: don't run this if galley is started, one ctlz is enough
