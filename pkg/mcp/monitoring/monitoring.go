@@ -46,10 +46,10 @@ var (
 		monitoring.WithLabels(componentTag),
 	)
 
-	// requestSizesBytes is a distribution of incoming message sizes.
-	requestSizesBytes = monitoring.NewDistribution(
+	// messageSizesBytes is a distribution of incoming message sizes.
+	messageSizesBytes = monitoring.NewDistribution(
 		"istio_mcp_message_sizes_bytes",
-		"Size of messages received from clients.",
+		"Size of sent and received messages.",
 		[]float64{1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864, 268435456, 1073741824},
 		monitoring.WithLabels(componentTag, collectionTag),
 		monitoring.WithUnit(monitoring.Bytes),
@@ -93,7 +93,7 @@ var (
 // StatsContext enables metric collection backed by OpenCensus.
 type StatsContext struct {
 	currentStreamCount       monitoring.Metric
-	requestSizeBytes         monitoring.Metric
+	messageSizeBytes         monitoring.Metric
 	requestAcksTotal         monitoring.Metric
 	requestNacksTotal        monitoring.Metric
 	sendFailuresTotal        monitoring.Metric
@@ -107,7 +107,7 @@ type Reporter interface {
 
 	RecordSendError(err error, code codes.Code)
 	RecordRecvError(err error, code codes.Code)
-	RecordRequestSize(collection string, connectionID int64, size int)
+	RecordMessageSize(collection string, connectionID int64, size int)
 	RecordRequestAck(collection string, connectionID int64)
 	RecordRequestNack(collection string, connectionID int64, code codes.Code)
 
@@ -147,9 +147,9 @@ func (s *StatsContext) RecordRecvError(err error, code codes.Code) {
 	recordError(err, code, s.recvFailuresTotal)
 }
 
-// RecordRequestSize records the size of a request from a connection for a specific type URL.
-func (s *StatsContext) RecordRequestSize(collection string, connectionID int64, size int) {
-	s.requestSizeBytes.With(
+// RecordMessageSize records the size of a request from a connection for a specific type URL.
+func (s *StatsContext) RecordMessageSize(collection string, connectionID int64, size int) {
+	s.messageSizeBytes.With(
 		collectionTag.Value(collection),
 	).Record(float64(size))
 }
@@ -185,7 +185,7 @@ func NewStatsContext(componentName string) *StatsContext {
 	}
 	ctx := &StatsContext{
 		currentStreamCount:       currentStreamCount.With(componentTag.Value(componentName)),
-		requestSizeBytes:         requestSizesBytes.With(componentTag.Value(componentName)),
+		messageSizeBytes:         messageSizesBytes.With(componentTag.Value(componentName)),
 		requestAcksTotal:         requestAcksTotal.With(componentTag.Value(componentName)),
 		requestNacksTotal:        requestNacksTotal.With(componentTag.Value(componentName)),
 		sendFailuresTotal:        sendFailuresTotal.With(componentTag.Value(componentName)),
@@ -199,7 +199,7 @@ func NewStatsContext(componentName string) *StatsContext {
 func init() {
 	monitoring.MustRegister(
 		currentStreamCount,
-		requestSizesBytes,
+		messageSizesBytes,
 		requestAcksTotal,
 		requestNacksTotal,
 		sendFailuresTotal,

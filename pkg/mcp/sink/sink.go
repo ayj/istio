@@ -101,6 +101,8 @@ func (sink *Sink) handleResponse(resources *mcp.Resources) *mcp.RequestResources
 		defer handleResponseDoneProbe()
 	}
 
+	sink.reporter.RecordMessageSize(resources.Collection, 0, internal.ProtoSize(resources))
+
 	state, ok := sink.state[resources.Collection]
 	if !ok {
 		errDetails := status.Errorf(codes.Unimplemented, "unsupported collection %v", resources.Collection)
@@ -203,6 +205,7 @@ func (sink *Sink) ProcessStream(stream Stream) error {
 			req = sink.handleResponse(resources)
 		}
 
+		sink.reporter.RecordMessageSize(req.Collection, 0, internal.ProtoSize(req))
 		sink.journal.RecordRequestResources(req)
 
 		if err := stream.Send(req); err != nil {

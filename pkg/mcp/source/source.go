@@ -345,6 +345,8 @@ func (con *connection) pushServerResponse(w *watch, resp *WatchResponse) error {
 		Incremental:       incremental,
 	}
 
+	con.reporter.RecordMessageSize(resp.Collection, con.id, internal.ProtoSize(msg))
+
 	// increment nonce
 	con.streamNonce++
 	msg.Nonce = strconv.FormatInt(con.streamNonce, 10)
@@ -403,7 +405,7 @@ func (con *connection) processClientRequest(req *mcp.RequestResources) error {
 
 	collection := req.Collection
 
-	con.reporter.RecordRequestSize(collection, con.id, internal.ProtoSize(req))
+	con.reporter.RecordMessageSize(collection, con.id, internal.ProtoSize(req))
 
 	w, ok := con.watches[collection]
 	if !ok {
